@@ -43,7 +43,7 @@
   "author": "kasper@diestoeckels.de",
   "license": "ISC",
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "eslint": "^10.3.0",
