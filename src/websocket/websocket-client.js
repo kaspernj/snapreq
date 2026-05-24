@@ -31,11 +31,14 @@ export default class SnapReqWebSocketClient {
    * @param {{getIsOnline?: () => boolean | Promise<boolean>, subscribe?: (callback: (isOnline: boolean) => void) => (() => void) | {remove: () => void}}} [args.networkMonitor] - Optional online-state adapter. When provided, auto-reconnect can wait for the network to report online before reconnecting, and open sockets are closed when the monitor reports offline.
    * @param {number[]} [args.reconnectDelays] - Backoff delays in ms (default: [1000, 2000, 4000, 8000, 15000]).
    * @param {{get: () => string | null | undefined | Promise<string | null | undefined>, set: (sessionId: string) => void | Promise<void>, clear: () => void | Promise<void>}} [args.sessionStore] - Optional sessionId persistence hook surviving reloads (localStorage, a cookie, SQLite, etc.).
+   * @param {(value: any) => any} [args.deserialize] - Optional transform applied to a response body inside `response.json()`. Lets an app re-hydrate its own wire format. Defaults to identity.
    */
-  constructor({autoReconnect = true, debug = false, networkMonitor, reconnectDelays, sessionStore, url} = /** @type {any} */ ({})) {
+  constructor({autoReconnect = true, debug = false, deserialize, networkMonitor, reconnectDelays, sessionStore, url} = /** @type {any} */ ({})) {
     if (!globalThis.WebSocket) throw new Error("WebSocket global is not available")
     if (!url) throw new Error("SnapReqWebSocketClient requires a url")
 
+    /** @type {(value: any) => any} */
+    this._deserialize = deserialize || ((value) => value)
     /** @type {boolean} */
     this.autoReconnect = autoReconnect
     this.debug = debug
@@ -637,7 +640,7 @@ export default class SnapReqWebSocketClient {
 
       if (pending) {
         this.pendingRequests.delete(id)
-        pending.resolve(new SnapReqWebSocketResponse(message))
+        pending.resolve(new SnapReqWebSocketResponse(message, this._deserialize))
       } else {
         this._debug(`No pending request for response id ${id}`)
       }
@@ -1006,8 +1009,9 @@ export default class SnapReqWebSocketClient {
 export class SnapReqWebSocketResponse {
   /**
    * @param {object} message - The response message.
+   * @param {(value: any) => any} [deserialize] - Transform applied to the parsed body in `json()`. Defaults to identity.
    */
-  constructor(message) {
+  constructor(message, deserialize) {
     const responseMessage = /** @type {{body?: any, headers?: Record<string, any>, id?: string | number | null, statusCode?: number, statusMessage?: string, type?: string}} */ (message)
 
     this.body = responseMessage.body
@@ -1016,14 +1020,15 @@ export class SnapReqWebSocketResponse {
     this.statusCode = responseMessage.statusCode || 200
     this.statusMessage = responseMessage.statusMessage || "OK"
     this.type = responseMessage.type
+    this._deserialize = deserialize || ((value) => value)
   }
 
-  /** @returns {any} - The parsed JSON body. */
+  /** @returns {any} - The parsed (and optionally deserialized) JSON body. */
   json() {
     if (typeof this.body !== "string") {
       throw new Error("Response body is not a string")
     }
 
-    return JSON.parse(this.body)
+    return this._deserialize(JSON.parse(this.body))
   }
 }

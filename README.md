@@ -150,7 +150,7 @@ await connection.ready
 connection.sendMessage({text: "hi"})
 ```
 
-Optional adapters: `networkMonitor` (gate reconnects on online state) and `sessionStore` (persist the session id across reloads).
+Optional adapters: `networkMonitor` (gate reconnects on online state), `sessionStore` (persist the session id across reloads) and `deserialize` (a `(value) => value` transform applied inside `response.json()` so an app can re-hydrate its own wire format).
 
 ## License
 

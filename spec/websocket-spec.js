@@ -42,6 +42,19 @@ describe("SnapReqWebSocketClient", () => {
     await client.close()
   })
 
+  it("applies the deserialize hook in response.json()", async () => {
+    const client = new SnapReqWebSocketClient({
+      url: server.url,
+      autoReconnect: false,
+      deserialize: (value) => ({...value, deserialized: true})
+    })
+    const response = await client.post("/things", {name: "thing"})
+
+    assert.equal(response.json().deserialized, true)
+
+    await client.close()
+  })
+
   it("subscribes to a channel and receives events", async () => {
     const client = new SnapReqWebSocketClient({url: server.url, autoReconnect: false})
     /** @type {any[]} */
