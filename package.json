@@ -1,0 +1,39 @@
+{
+  "name": "snapreq",
+  "version": "0.0.1",
+  "description": "Cross-platform HTTP and WebSocket client with one API across Node, web, Expo and React Native",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/**"
+  ],
+  "scripts": {
+    "lint": "eslint src spec",
+    "test": "node --test \"spec/**/*-spec.js\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "http",
+    "fetch",
+    "websocket",
+    "client",
+    "expo",
+    "react-native",
+    "cross-platform"
+  ],
+  "author": "kasper@diestoeckels.de",
+  "license": "ISC",
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.3.0",
+    "eslint-plugin-jsdoc": "^62.9.0",
+    "globals": "^16.0.0",
+    "typescript": "^6.0.3",
+    "ws": "^8.21.0"
+  }
+}
