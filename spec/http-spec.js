@@ -3,7 +3,8 @@
 import {after, before, describe, it} from "node:test"
 import assert from "node:assert/strict"
 import {Readable} from "node:stream"
-import SnapReq, {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "../src/index.js"
+import SnapReq from "../src/snap-req.js"
+import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
 import {startTestServer} from "./support/test-server.js"
 
 /** @type {Awaited<ReturnType<typeof startTestServer>>} */

@@ -15,6 +15,19 @@ The same code runs everywhere. Where a platform cannot provide a feature (Unix s
 npm install snapreq
 ```
 
+## Imports
+
+snapreq has **no barrel entry point** — you import each piece from its own subpath so a bundler (Metro/Expo, webpack, …) only pulls in what you use, and the HTTP client never drags the WebSocket client into your bundle:
+
+```js
+import SnapReq from "snapreq"                       // the HTTP client
+import SnapReqWebSocketClient from "snapreq/websocket"
+import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "snapreq/errors"
+import {defaultRetryableError} from "snapreq/retry"
+import SnapReqResponse from "snapreq/response"
+import SnapReqHeaders from "snapreq/headers"
+```
+
 ## HTTP
 
 ```js
@@ -69,7 +82,7 @@ await client.get("/flaky", {retry: true})
 await client.get("/flaky", {retry: {tries: 5, waitMs: 200, retryableStatuses: [503]}})
 
 // Compose extra rules on top of the default network classifier:
-import {defaultRetryableError} from "snapreq"
+import {defaultRetryableError} from "snapreq/retry"
 
 await client.get("/x", {retry: {shouldRetry: (error) => defaultRetryableError(error) || isMyCase(error)}})
 ```
@@ -118,7 +131,7 @@ const caps = await client.capabilities()
 A WebSocket client over `globalThis.WebSocket` with auto-reconnect, session resumption, request/response calls, channel subscriptions and 1:1 connections.
 
 ```js
-import {SnapReqWebSocketClient} from "snapreq"
+import SnapReqWebSocketClient from "snapreq/websocket"
 
 const client = new SnapReqWebSocketClient({url: "wss://example.com/websocket"})
 

@@ -1,16 +1,27 @@
 {
   "name": "snapreq",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Cross-platform HTTP and WebSocket client with one API across Node, web, Expo and React Native",
   "type": "module",
-  "main": "src/index.js",
+  "main": "./src/snap-req.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/snap-req.js",
+    "./websocket": "./src/websocket/websocket-client.js",
+    "./errors": "./src/errors.js",
+    "./headers": "./src/headers.js",
+    "./response": "./src/response.js",
+    "./retry": "./src/retry.js",
+    "./capabilities": "./src/capabilities.js",
+    "./transports/select": "./src/transports/select.js",
+    "./transports/fetch": "./src/transports/fetch-transport.js",
+    "./transports/xhr": "./src/transports/xhr-transport.js",
+    "./*": "./src/*.js"
   },
   "files": [
     "src/**"
   ],
   "scripts": {
+    "all-checks": "npm run typecheck && npm run lint && npm run test",
     "lint": "eslint src spec",
     "test": "node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit"

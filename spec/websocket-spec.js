@@ -2,10 +2,8 @@
 
 import {after, before, describe, it} from "node:test"
 import assert from "node:assert/strict"
-import SnapReq, {SnapReqWebSocketClient} from "../src/index.js"
+import SnapReqWebSocketClient from "../src/websocket/websocket-client.js"
 import {startTestWebSocketServer} from "./support/test-websocket-server.js"
-
-void SnapReq
 
 /** @type {Awaited<ReturnType<typeof startTestWebSocketServer>>} */
 let server
