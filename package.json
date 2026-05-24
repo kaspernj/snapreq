@@ -48,7 +48,7 @@
     "@types/ws": "^8.18.1",
     "eslint": "^10.3.0",
     "eslint-plugin-jsdoc": "^63.0.0",
-    "globals": "^16.0.0",
+    "globals": "^17.6.0",
     "release-patch": "^1.0.0",
     "typescript": "^6.0.3",
     "ws": "^8.21.0"
