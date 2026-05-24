@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "inlineSourceMap": false,
+    "declarationMap": false,
+    "rootDir": "src",
+    "outDir": "types"
+  },
+  "include": ["src/**/*.js"]
+}

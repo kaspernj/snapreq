@@ -1,28 +1,32 @@
 {
   "name": "snapreq",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Cross-platform HTTP and WebSocket client with one API across Node, web, Expo and React Native",
   "type": "module",
   "main": "./src/snap-req.js",
+  "types": "./types/snap-req.d.ts",
   "exports": {
-    ".": "./src/snap-req.js",
-    "./websocket": "./src/websocket/websocket-client.js",
-    "./errors": "./src/errors.js",
-    "./headers": "./src/headers.js",
-    "./response": "./src/response.js",
-    "./retry": "./src/retry.js",
-    "./capabilities": "./src/capabilities.js",
-    "./transports/select": "./src/transports/select.js",
-    "./transports/fetch": "./src/transports/fetch-transport.js",
-    "./transports/xhr": "./src/transports/xhr-transport.js",
-    "./*": "./src/*.js"
+    ".": {"types": "./types/snap-req.d.ts", "default": "./src/snap-req.js"},
+    "./websocket": {"types": "./types/websocket/websocket-client.d.ts", "default": "./src/websocket/websocket-client.js"},
+    "./errors": {"types": "./types/errors.d.ts", "default": "./src/errors.js"},
+    "./headers": {"types": "./types/headers.d.ts", "default": "./src/headers.js"},
+    "./response": {"types": "./types/response.d.ts", "default": "./src/response.js"},
+    "./retry": {"types": "./types/retry.d.ts", "default": "./src/retry.js"},
+    "./capabilities": {"types": "./types/capabilities.d.ts", "default": "./src/capabilities.js"},
+    "./transports/select": {"types": "./types/transports/select.d.ts", "default": "./src/transports/select.js"},
+    "./transports/fetch": {"types": "./types/transports/fetch-transport.d.ts", "default": "./src/transports/fetch-transport.js"},
+    "./transports/xhr": {"types": "./types/transports/xhr-transport.d.ts", "default": "./src/transports/xhr-transport.js"},
+    "./*": {"types": "./types/*.d.ts", "default": "./src/*.js"}
   },
   "files": [
-    "src/**"
+    "src/**",
+    "types/**"
   ],
   "scripts": {
     "all-checks": "npm run typecheck && npm run lint && npm run test",
+    "build:types": "tsc -p tsconfig.build.json",
     "lint": "eslint src spec",
+    "prepublishOnly": "npm run build:types",
     "test": "node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit"
   },
