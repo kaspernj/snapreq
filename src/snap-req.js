@@ -173,6 +173,12 @@ export default class SnapReq {
       signal: composedSignal.signal,
       clear,
       response: (response, request) => {
+        if (response._bodyDone) {
+          clear()
+
+          return response
+        }
+
         response._onBodyDone = this._chainBodyDone(response._onBodyDone, clear)
         response._mapBodyError = this._chainBodyError(response._mapBodyError, (error) => toError(error, request))
 

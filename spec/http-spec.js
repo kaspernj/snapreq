@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import {Readable} from "node:stream"
 import SnapReq from "../src/snap-req.js"
 import {SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
+import SnapReqResponse from "../src/response.js"
 import {startTestServer} from "./support/test-server.js"
 
 /** @type {Awaited<ReturnType<typeof startTestServer>>} */
@@ -146,6 +147,51 @@ for (const transport of ["node", "fetch"]) {
       assert.deepEqual(await response.json(), {ok: true, attempts: 2})
 
       client.close()
+    })
+
+    it("clears timeout timers for already-buffered transport responses", async () => {
+      const originalSetTimeout = globalThis.setTimeout
+      const originalClearTimeout = globalThis.clearTimeout
+      /** @type {unknown[]} */
+      const timers = []
+      const clearedTimers = new Set()
+
+      globalThis.setTimeout = (callback, delay, ...args) => {
+        const timer = originalSetTimeout(callback, delay, ...args)
+
+        timers.push(timer)
+
+        return timer
+      }
+      globalThis.clearTimeout = (timer) => {
+        clearedTimers.add(timer)
+
+        return originalClearTimeout(timer)
+      }
+
+      const client = newClient({
+        transport: {
+          capabilities: {},
+          performRequest: async (request) => new SnapReqResponse({
+            url: request.url,
+            method: request.method,
+            status: 200,
+            bytes: new TextEncoder().encode("buffered")
+          })
+        },
+        timeoutMs: 100
+      })
+
+      try {
+        const response = await client.get("/already-buffered")
+
+        assert.equal(await response.text(), "buffered")
+        assert.equal(clearedTimers.has(timers[0]), true)
+      } finally {
+        client.close()
+        globalThis.setTimeout = originalSetTimeout
+        globalThis.clearTimeout = originalClearTimeout
+      }
     })
 
     it("streams a response body chunk by chunk", async () => {
