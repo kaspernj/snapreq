@@ -40,8 +40,10 @@ export default class SnapReqResponse {
    * @param {Uint8Array} [options.bytes] - Fully-read body, when the transport already buffered it.
    * @param {AsyncIterable<Uint8Array>} [options.stream] - Streamed body, when the transport supports streaming.
    * @param {import("node:stream").Readable} [options.nodeStream] - Raw Node stream, when available, for advanced consumers.
+   * @param {() => void} [options.onBodyDone] - Callback fired when body reading finishes or fails.
+   * @param {(error: unknown) => unknown} [options.mapBodyError] - Maps body read errors before rethrowing.
    */
-  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream}) {
+  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, mapBodyError}) {
     this.url = url
     this.method = method
     this.status = status
@@ -54,6 +56,11 @@ export default class SnapReqResponse {
     /** @type {import("node:stream").Readable | undefined} */
     this.nodeStream = nodeStream
     this._streamConsumed = false
+    this._bodyDone = false
+    this._onBodyDone = onBodyDone
+    this._mapBodyError = mapBodyError
+
+    if (bytes !== undefined) this._finishBody()
   }
 
   /** @returns {boolean} - Whether the status is in the 2xx range. */
@@ -77,7 +84,7 @@ export default class SnapReqResponse {
 
     this._streamConsumed = true
 
-    return this._stream
+    return this._wrappedStream(this._stream)
   }
 
   /** @returns {boolean} - Whether the body is available as a stream that has not been read yet. */
@@ -94,20 +101,15 @@ export default class SnapReqResponse {
 
     if (!this._stream) {
       this._bytes = new Uint8Array(0)
+      this._finishBody()
 
       return this._bytes
     }
 
-    if (this._streamConsumed) {
-      throw new Error("Cannot buffer this response: its stream was already consumed via stream().")
-    }
-
-    this._streamConsumed = true
-
     /** @type {Uint8Array[]} */
     const chunks = []
 
-    for await (const chunk of this._stream) {
+    for await (const chunk of this.stream()) {
       chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk))
     }
 
@@ -152,5 +154,44 @@ export default class SnapReqResponse {
     if (!text) return null
 
     return JSON.parse(text)
+  }
+
+  /**
+   * @param {AsyncIterable<Uint8Array>} source - Source response stream.
+   * @returns {AsyncIterable<Uint8Array>} - Stream with cleanup/error mapping.
+   */
+  _wrappedStream(source) {
+    const response = this
+
+    return (async function* () {
+      try {
+        for await (const chunk of source) {
+          yield chunk
+        }
+      } catch (error) {
+        throw response._mappedBodyError(error)
+      } finally {
+        response._finishBody()
+      }
+    })()
+  }
+
+  /**
+   * @param {unknown} error - Body read error.
+   * @returns {unknown} - Error to rethrow.
+   */
+  _mappedBodyError(error) {
+    if (this._mapBodyError) return this._mapBodyError(error)
+
+    return error
+  }
+
+  /** @returns {void} */
+  _finishBody() {
+    if (this._bodyDone) return
+
+    this._bodyDone = true
+
+    if (this._onBodyDone) this._onBodyDone()
   }
 }

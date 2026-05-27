@@ -1,6 +1,6 @@
 // @ts-check
 
-import {SnapReqHttpError} from "./errors.js"
+import {SnapReqHttpError, SnapReqTimeoutError} from "./errors.js"
 
 const RETRYABLE_ERROR_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENOENT", "ETIMEDOUT", "EPIPE"])
 const DEFAULT_RETRYABLE_STATUSES = [502, 503, 504]
@@ -28,6 +28,8 @@ const DEFAULT_RETRYABLE_STATUSES = [502, 503, 504]
  * @returns {boolean} - Whether the error is a transient network failure.
  */
 export function defaultRetryableError(error) {
+  if (error instanceof SnapReqTimeoutError) return true
+
   if (!error || typeof error !== "object") return false
 
   if ("code" in error && typeof error.code === "string" && RETRYABLE_ERROR_CODES.has(error.code)) {

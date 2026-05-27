@@ -67,3 +67,20 @@ export class SnapReqAbortError extends SnapReqError {
     this.name = "SnapReqAbortError"
   }
 }
+
+/** Thrown when a request exceeds its configured timeout. */
+export class SnapReqTimeoutError extends SnapReqError {
+  /**
+   * @param {object} options - Error metadata.
+   * @param {string} options.method - HTTP method used for the request.
+   * @param {string} options.url - Fully resolved request URL.
+   * @param {number} options.timeoutMs - Timeout in milliseconds.
+   */
+  constructor({method, url, timeoutMs}) {
+    super(`Request timed out after ${timeoutMs}ms: ${method} ${url}`)
+    this.name = "SnapReqTimeoutError"
+    this.method = method
+    this.url = url
+    this.timeoutMs = timeoutMs
+  }
+}
