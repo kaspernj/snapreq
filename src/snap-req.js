@@ -1,6 +1,6 @@
 // @ts-check
 
-import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "./errors.js"
+import {SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "./errors.js"
 import SnapReqHeaders from "./headers.js"
 import {buildUrl, normalizeBody} from "./request.js"
 import {normalizeRetryOptions, runWithRetry} from "./retry.js"
@@ -18,6 +18,7 @@ import {selectTransport} from "./transports/select.js"
  * @property {import("./request.js").NormalizedBody} body - Normalized request body.
  * @property {CompressionEncoding} bodyCompression - Request body compression.
  * @property {AbortSignal} [signal] - Abort signal.
+ * @property {number} [timeoutMs] - Request timeout in milliseconds.
  * @property {string} [credentials] - Fetch credentials mode ("omit" | "same-origin" | "include").
  */
 
@@ -31,9 +32,18 @@ import {selectTransport} from "./transports/select.js"
  * @property {any} [body] - Request body: string, object (JSON), Uint8Array/ArrayBuffer, or a stream/async-iterable.
  * @property {CompressionEncoding} [bodyCompression] - Compress the request body (Node transport only).
  * @property {AbortSignal} [signal] - Abort signal for the request.
+ * @property {number} [timeoutMs] - Request timeout in milliseconds. Set to `0` to disable a client default.
  * @property {string} [credentials] - Fetch credentials mode.
  * @property {boolean | import("./retry.js").RetryOptions} [retry] - Retry transient failures.
  * @property {boolean} [throwOnError] - Throw `SnapReqHttpError` on non-2xx responses.
+ */
+
+/**
+ * @typedef {object} RequestTimeout
+ * @property {AbortSignal | undefined} signal - Signal to use for the request.
+ * @property {() => void} clear - Clears timeout resources.
+ * @property {(response: import("./response.js").default, request: NormalizedRequest) => import("./response.js").default} response - Attaches timeout handling to a response.
+ * @property {(error: unknown, request: NormalizedRequest) => unknown} error - Maps a thrown error.
  */
 
 /**
@@ -52,14 +62,16 @@ export default class SnapReq {
    * @param {Record<string, string | number> | (() => Record<string, string | number>)} [config.headers] - Default headers (object or factory).
    * @param {boolean | import("./retry.js").RetryOptions} [config.retry] - Default retry policy.
    * @param {boolean} [config.throwOnError] - Throw `SnapReqHttpError` on non-2xx responses by default. Defaults to false.
+   * @param {number} [config.timeoutMs] - Default request timeout in milliseconds. Set per-request `timeoutMs: 0` to disable.
    * @param {string} [config.credentials] - Default fetch credentials mode.
    * @param {import("./transports/select.js").TransportName | import("./transports/select.js").Transport} [config.transport] - Transport preference or instance. Defaults to "auto".
    */
-  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, credentials, transport = "auto"} = {}) {
+  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, timeoutMs, credentials, transport = "auto"} = {}) {
     this.baseUrl = baseUrl
     this.defaultHeaders = headers
     this.defaultRetry = retry
     this.throwOnError = throwOnError
+    this.timeoutMs = timeoutMs
     this.credentials = credentials
     this._transportPreference = transport
     this._nodeConfig = {socketPath, tls, keepAlive}
@@ -110,8 +122,112 @@ export default class SnapReq {
       body,
       bodyCompression: options.bodyCompression || "identity",
       signal: options.signal,
+      timeoutMs: options.timeoutMs ?? this.timeoutMs,
       credentials: options.credentials ?? this.credentials
     }
+  }
+
+  /**
+   * @param {RequestOptions} options - Request options.
+   * @returns {RequestTimeout} - Timeout handling for one request attempt.
+   */
+  _requestTimeout(options) {
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs
+
+    if (!timeoutMs || timeoutMs <= 0) {
+      return {
+        signal: options.signal,
+        clear: () => {},
+        response: (response) => response,
+        error: (error) => error
+      }
+    }
+
+    const timeoutController = new AbortController()
+    const composedSignal = this._composeSignal(options.signal, timeoutController.signal)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      timeoutController.abort()
+    }, timeoutMs)
+
+    if (typeof timer.unref === "function") timer.unref()
+
+    const clear = () => {
+      clearTimeout(timer)
+      composedSignal.clear()
+    }
+    const toError = (error, request) => {
+      if (timedOut) {
+        return new SnapReqTimeoutError({
+          method: request.method,
+          url: request.url,
+          timeoutMs
+        })
+      }
+
+      return error
+    }
+
+    return {
+      signal: composedSignal.signal,
+      clear,
+      response: (response, request) => {
+        response._onBodyDone = this._chainBodyDone(response._onBodyDone, clear)
+        response._mapBodyError = this._chainBodyError(response._mapBodyError, (error) => toError(error, request))
+
+        return response
+      },
+      error: toError
+    }
+  }
+
+  /**
+   * @param {AbortSignal | undefined} callerSignal - Caller-supplied signal.
+   * @param {AbortSignal} timeoutSignal - Timeout signal.
+   * @returns {{signal: AbortSignal, clear: () => void}} - Signal that aborts when either source aborts.
+   */
+  _composeSignal(callerSignal, timeoutSignal) {
+    if (!callerSignal) return {signal: timeoutSignal, clear: () => {}}
+
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+
+    if (callerSignal.aborted || timeoutSignal.aborted) {
+      controller.abort()
+    } else {
+      callerSignal.addEventListener("abort", abort, {once: true})
+      timeoutSignal.addEventListener("abort", abort, {once: true})
+    }
+
+    return {
+      signal: controller.signal,
+      clear: () => {
+        callerSignal.removeEventListener("abort", abort)
+        timeoutSignal.removeEventListener("abort", abort)
+      }
+    }
+  }
+
+  /**
+   * @param {(() => void) | undefined} existing - Existing body-done callback.
+   * @param {() => void} next - Callback to add.
+   * @returns {() => void} - Combined callback.
+   */
+  _chainBodyDone(existing, next) {
+    return () => {
+      if (existing) existing()
+      next()
+    }
+  }
+
+  /**
+   * @param {((error: unknown) => unknown) | undefined} existing - Existing error mapper.
+   * @param {(error: unknown) => unknown} next - Mapper to add.
+   * @returns {(error: unknown) => unknown} - Combined mapper.
+   */
+  _chainBodyError(existing, next) {
+    return (error) => next(existing ? existing(error) : error)
   }
 
   /**
@@ -122,16 +238,15 @@ export default class SnapReq {
    * @returns {Promise<import("./response.js").default>} - The response.
    */
   async request(options) {
-    const normalized = this._normalize(options)
     const transport = await this._resolveTransport()
     const throwOnError = options.throwOnError ?? this.throwOnError
     const retry = normalizeRetryOptions(options.retry ?? this.defaultRetry)
-    const canRetry = retry && normalized.body.kind !== "stream"
-
-    const attempt = () => transport.performRequest(normalized)
+    const body = normalizeBody(options.body, new SnapReqHeaders(options.headers))
+    const canRetry = retry && body.kind !== "stream"
+    const attempt = async () => this._requestWithTimeout(options, (request) => transport.performRequest(request))
     const response = canRetry ? await runWithRetry(attempt, /** @type {any} */ (retry)) : await attempt()
 
-    if (throwOnError && !response.ok) throw await this._httpError(response, normalized)
+    if (throwOnError && !response.ok) throw await this._httpError(response, this._normalize(options))
 
     return response
   }
@@ -144,7 +259,6 @@ export default class SnapReq {
    * @returns {Promise<import("./response.js").default>} - The streaming response.
    */
   async requestStream(options) {
-    const normalized = this._normalize(options)
     const transport = await this._resolveTransport()
 
     if (!transport.capabilities.responseStreaming) {
@@ -154,13 +268,33 @@ export default class SnapReq {
       })
     }
 
-    const response = await transport.performRequest(normalized)
+    const response = await this._requestWithTimeout(options, (request) => transport.performRequest(request))
 
     if ((options.throwOnError ?? this.throwOnError) && !response.ok) {
-      throw await this._httpError(response, normalized)
+      throw await this._httpError(response, this._normalize(options))
     }
 
     return response
+  }
+
+  /**
+   * @param {RequestOptions} options - Request options.
+   * @param {(request: NormalizedRequest) => Promise<import("./response.js").default>} performRequest - Transport request runner.
+   * @returns {Promise<import("./response.js").default>} - Response with timeout handling attached.
+   */
+  async _requestWithTimeout(options, performRequest) {
+    const timeout = this._requestTimeout(options)
+    const normalized = this._normalize({...options, signal: timeout.signal})
+
+    try {
+      const response = await performRequest(normalized)
+
+      return timeout.response(response, normalized)
+    } catch (error) {
+      timeout.clear()
+
+      throw timeout.error(error, normalized)
+    }
   }
 
   /**
@@ -221,7 +355,9 @@ export default class SnapReq {
 
     try {
       responseText = await response.text()
-    } catch {
+    } catch (error) {
+      if (error instanceof SnapReqTimeoutError) throw error
+
       // Body unavailable (already streamed or read error) — fall back to status text.
     }
 

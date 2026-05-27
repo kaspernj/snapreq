@@ -4,7 +4,7 @@ import {after, before, describe, it} from "node:test"
 import assert from "node:assert/strict"
 import {Readable} from "node:stream"
 import SnapReq from "../src/snap-req.js"
-import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
+import {SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
 import {startTestServer} from "./support/test-server.js"
 
 /** @type {Awaited<ReturnType<typeof startTestServer>>} */
@@ -101,6 +101,49 @@ for (const transport of ["node", "fetch"]) {
 
       assert.equal(response.status, 200)
       assert.deepEqual(await response.json(), {ok: true, attempts: 3})
+
+      client.close()
+    })
+
+    it("times out before response headers arrive", async () => {
+      const client = newClient({timeoutMs: 100})
+
+      await assert.rejects(
+        () => client.get("/slow-start"),
+        (error) => {
+          assert.ok(error instanceof SnapReqTimeoutError)
+          assert.equal(error.method, "GET")
+          assert.match(error.url, /\/slow-start$/)
+          assert.equal(error.timeoutMs, 100)
+          return true
+        }
+      )
+
+      client.close()
+    })
+
+    it("times out while buffering the response body", async () => {
+      const client = newClient()
+      const response = await client.get("/slow-body", {timeoutMs: 100})
+
+      await assert.rejects(
+        () => response.text(),
+        (error) => {
+          assert.ok(error instanceof SnapReqTimeoutError)
+          assert.match(error.url, /\/slow-body$/)
+          return true
+        }
+      )
+
+      client.close()
+    })
+
+    it("retries timed-out requests when retry is enabled", async () => {
+      server.resetSlowFlaky()
+      const client = newClient()
+      const response = await client.get("/flaky-slow", {timeoutMs: 100, retry: {tries: 2, waitMs: 1}})
+
+      assert.deepEqual(await response.json(), {ok: true, attempts: 2})
 
       client.close()
     })

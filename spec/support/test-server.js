@@ -20,10 +20,11 @@ function decodeBody(body, encoding) {
 
 /**
  * Starts a small HTTP server exposing fixed routes used by the HTTP specs.
- * @returns {Promise<{baseUrl: string, close: () => Promise<void>, flakyCalls: () => number, resetFlaky: () => void}>} - Server handle.
+ * @returns {Promise<{baseUrl: string, close: () => Promise<void>, flakyCalls: () => number, resetFlaky: () => void, resetSlowFlaky: () => void}>} - Server handle.
  */
 export async function startTestServer() {
   let flakyCalls = 0
+  let slowFlakyCalls = 0
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost")
@@ -63,6 +64,18 @@ export async function startTestServer() {
           res.write("chunk-2;")
           setTimeout(() => res.end("chunk-3"), 10)
         }, 10)
+      } else if (url.pathname === "/slow-start") {
+        // Intentionally never respond, simulating a stalled upstream.
+      } else if (url.pathname === "/slow-body") {
+        res.writeHead(200, {"Content-Type": "text/plain"})
+        res.write("partial")
+      } else if (url.pathname === "/flaky-slow") {
+        slowFlakyCalls += 1
+
+        if (slowFlakyCalls === 1) return
+
+        res.writeHead(200, {"Content-Type": "application/json"})
+        res.end(JSON.stringify({ok: true, attempts: slowFlakyCalls}))
       } else if (url.pathname === "/flaky") {
         flakyCalls += 1
 
@@ -92,6 +105,9 @@ export async function startTestServer() {
     flakyCalls: () => flakyCalls,
     resetFlaky: () => {
       flakyCalls = 0
+    },
+    resetSlowFlaky: () => {
+      slowFlakyCalls = 0
     }
   }
 }

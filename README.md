@@ -63,6 +63,7 @@ new SnapReq({
   headers,        // default headers — object or a factory `() => ({...})` for dynamic auth
   retry,          // default retry policy (see below)
   throwOnError,   // throw SnapReqHttpError on non-2xx (default false)
+  timeoutMs,      // default request/body timeout in milliseconds; per-request 0 disables it
   credentials,    // fetch credentials mode: "omit" | "same-origin" | "include"
   transport,      // "auto" (default) | "node" | "fetch" | "xhr" | a transport instance
 
@@ -71,6 +72,17 @@ new SnapReq({
   tls,            // {ca, cert, key, rejectUnauthorized}
   keepAlive       // reuse connections (default true)
 })
+```
+
+### Timeouts
+
+Set `timeoutMs` on the client or a single request to abort stalled requests. The timeout covers the response headers and body reads through `json()`, `text()`, `bytes()`, `buffer()`, or `stream()`. A timed-out request rejects with `SnapReqTimeoutError`.
+
+```js
+const client = new SnapReq({baseUrl: "https://api.example.com", timeoutMs: 120000})
+
+await client.get("/slow", {timeoutMs: 5000})
+await client.get("/long-running", {timeoutMs: 0}) // disable the client default for this call
 ```
 
 ### Retry
