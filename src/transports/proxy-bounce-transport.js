@@ -1,17 +1,24 @@
 // @ts-check
 
 import {buildCapabilities} from "../capabilities.js"
+import {SnapReqUnsupportedFeatureError} from "../errors.js"
 import SnapReqHeaders from "../headers.js"
 import SnapReqResponse from "../response.js"
 
-/** @param {Uint8Array} bytes @returns {string} */
+/**
+ * @param {Uint8Array} bytes - Bytes to encode.
+ * @returns {string} - Base64 string.
+ */
 function base64Encode(bytes) {
   const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("")
 
   return btoa(binary)
 }
 
-/** @param {string} base64 @returns {Uint8Array} */
+/**
+ * @param {string} base64 - Base64-encoded string.
+ * @returns {Uint8Array} - Decoded bytes.
+ */
 function base64Decode(base64) {
   const binary = atob(base64)
   const bytes = new Uint8Array(binary.length)
@@ -58,10 +65,16 @@ export default class ProxyBounceTransport {
     /** @type {string | null} */
     let serializedBody = null
 
+    /** @type {string | undefined} */
+    let bodyEncoding
+
     if (requestBody.kind === "text") {
       serializedBody = /** @type {string} */ (requestBody.value)
     } else if (requestBody.kind === "bytes") {
       serializedBody = base64Encode(/** @type {Uint8Array} */ (requestBody.value))
+      bodyEncoding = "base64"
+    } else if (requestBody.kind === "stream") {
+      throw new SnapReqUnsupportedFeatureError({feature: "streamed request bodies", transport: "proxy-bounce"})
     }
 
     /** @type {Record<string, any>} */
@@ -72,6 +85,10 @@ export default class ProxyBounceTransport {
       url: request.url
     }
 
+    if (bodyEncoding) {
+      proxyPayload.bodyEncoding = bodyEncoding
+    }
+
     /** @type {Response} */
     let proxyResponse
 
@@ -79,7 +96,8 @@ export default class ProxyBounceTransport {
       proxyResponse = await fetch(this.proxyUrl, {
         body: JSON.stringify(proxyPayload),
         headers: {"Content-Type": "application/json"},
-        method: "POST"
+        method: "POST",
+        signal: request.signal || undefined
       })
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
