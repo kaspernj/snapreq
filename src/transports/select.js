@@ -4,6 +4,8 @@ import {SnapReqError} from "../errors.js"
 import FetchTransport from "./fetch-transport.js"
 import XhrTransport from "./xhr-transport.js"
 
+const NODE_TRANSPORT_MODULE_PATH = "snapreq/transports/node-transport"
+
 /**
  * @typedef {"auto" | "node" | "fetch" | "xhr"} TransportName
  */
@@ -13,6 +15,14 @@ import XhrTransport from "./xhr-transport.js"
  * @property {import("../capabilities.js").TransportCapabilities} capabilities - Supported capabilities.
  * @property {(request: import("../snap-req.js").NormalizedRequest) => Promise<import("../response.js").default>} performRequest - Perform a request.
  * @property {() => void} [close] - Optional resource cleanup.
+ */
+
+/**
+ * @typedef {new (config: object) => Transport} NodeTransportConstructor
+ */
+
+/**
+ * @typedef {{default: NodeTransportConstructor}} NodeTransportModule
  */
 
 /**
@@ -34,7 +44,10 @@ export function detectRuntime() {
  * @returns {Promise<Transport>} - A Node transport instance.
  */
 async function createNodeTransport(config) {
-  const {default: NodeTransport} = await import("./node-transport.js")
+  const dynamicImport = /** @type {(specifier: string) => Promise<NodeTransportModule>} */ (
+    new Function("specifier", "return import(specifier)")
+  )
+  const {default: NodeTransport} = await dynamicImport(NODE_TRANSPORT_MODULE_PATH)
 
   return new NodeTransport(config)
 }

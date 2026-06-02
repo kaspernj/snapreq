@@ -71,6 +71,11 @@ export default class SnapReqHeaders {
     for (const {name, value} of this._map.values()) yield [name, value]
   }
 
+  /** @returns {IterableIterator<[string, string]>} - Header entries for structural copying. */
+  [Symbol.iterator]() {
+    return this.entries()
+  }
+
   /** @returns {[string, string][]} - Name/value pairs preserving original casing. */
   toArray() {
     return [...this.entries()]
