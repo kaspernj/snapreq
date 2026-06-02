@@ -31,6 +31,18 @@ function base64Decode(base64) {
 }
 
 /**
+ * @param {Uint8Array} bytes - Buffered response bytes.
+ * @returns {AsyncIterable<Uint8Array>} - One-shot stream over the buffered bytes.
+ */
+function bufferedByteStream(bytes) {
+  return (async function* () {
+    if (bytes.byteLength > 0) {
+      yield bytes
+    }
+  })()
+}
+
+/**
  * Transport that bounces every request through a same-origin proxy endpoint.
  * Used when the real target is a different origin and CORS would block direct
  * browser `fetch` calls. The proxy backend makes the outbound request
@@ -125,11 +137,11 @@ export default class ProxyBounceTransport {
     }
 
     return new SnapReqResponse({
-      bytes: bodyBytes,
       headers: responseHeaders,
       method: request.method,
       status: payload.status,
       statusText: payload.statusText || "",
+      stream: bufferedByteStream(bodyBytes),
       url: request.url
     })
   }
