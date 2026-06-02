@@ -46,10 +46,6 @@
       "types": "./types/transports/xhr-transport.d.ts",
       "default": "./src/transports/xhr-transport.js"
     },
-    "./transports/proxy-bounce": {
-      "types": "./types/transports/proxy-bounce-transport.d.ts",
-      "default": "./src/transports/proxy-bounce-transport.js"
-    },
     "./*": {
       "types": "./types/*.d.ts",
       "default": "./src/*.js"
