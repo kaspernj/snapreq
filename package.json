@@ -3,65 +3,29 @@
   "version": "0.0.4",
   "description": "Cross-platform HTTP and WebSocket client with one API across Node, web, Expo and React Native",
   "type": "module",
-  "main": "./src/snap-req.js",
-  "types": "./types/snap-req.d.ts",
+  "main": "./build/snap-req.js",
+  "types": "./build/snap-req.d.ts",
   "exports": {
     ".": {
-      "types": "./types/snap-req.d.ts",
-      "default": "./src/snap-req.js"
-    },
-    "./websocket": {
-      "types": "./types/websocket/websocket-client.d.ts",
-      "default": "./src/websocket/websocket-client.js"
-    },
-    "./errors": {
-      "types": "./types/errors.d.ts",
-      "default": "./src/errors.js"
-    },
-    "./headers": {
-      "types": "./types/headers.d.ts",
-      "default": "./src/headers.js"
-    },
-    "./response": {
-      "types": "./types/response.d.ts",
-      "default": "./src/response.js"
-    },
-    "./retry": {
-      "types": "./types/retry.d.ts",
-      "default": "./src/retry.js"
-    },
-    "./capabilities": {
-      "types": "./types/capabilities.d.ts",
-      "default": "./src/capabilities.js"
-    },
-    "./transports/select": {
-      "types": "./types/transports/select.d.ts",
-      "default": "./src/transports/select.js"
-    },
-    "./transports/fetch": {
-      "types": "./types/transports/fetch-transport.d.ts",
-      "default": "./src/transports/fetch-transport.js"
-    },
-    "./transports/xhr": {
-      "types": "./types/transports/xhr-transport.d.ts",
-      "default": "./src/transports/xhr-transport.js"
+      "types": "./build/snap-req.d.ts",
+      "default": "./build/snap-req.js"
     },
     "./*": {
-      "types": "./types/*.d.ts",
-      "default": "./src/*.js"
+      "types": "./build/*.d.ts",
+      "default": "./build/*.js"
     }
   },
   "files": [
-    "src/**",
-    "types/**"
+    "build/**"
   ],
   "scripts": {
     "all-checks": "npm run typecheck && npm run lint && npm run test",
-    "build:types": "tsc -p tsconfig.build.json",
+    "build": "rm -rf build && tsc",
     "lint": "eslint src spec",
-    "prepublishOnly": "npm run build:types",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
     "release:patch": "release-patch",
-    "test": "node --test \"spec/**/*-spec.js\"",
+    "test": "npm run build && node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
