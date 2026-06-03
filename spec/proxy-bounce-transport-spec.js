@@ -156,4 +156,38 @@ describe("ProxyBounceTransport", () => {
       await proxy.close()
     }
   })
+
+  it("exposes buffered proxied responses as readable streams", async () => {
+    const proxy = await startMockProxy({
+      body: new TextEncoder().encode("data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n"),
+      responseHeaders: {"Content-Type": "text/event-stream"}
+    })
+
+    try {
+      const client = new SnapReq({
+        baseUrl: "http://example.com",
+        transport: new ProxyBounceTransport({proxyUrl: `http://127.0.0.1:${proxy.port}/api/proxy`})
+      })
+
+      const response = await client.get("/stream")
+      const decoder = new TextDecoder()
+      let text = ""
+
+      assert.equal(response.headers.get("content-type"), "text/event-stream")
+      assert.equal(response.streamable, true)
+
+      for await (const chunk of response.stream()) {
+        text += decoder.decode(chunk, {stream: true})
+      }
+
+      text += decoder.decode()
+
+      assert.equal(text, "data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n")
+      assert.equal(response.streamable, false)
+
+      client.close()
+    } finally {
+      await proxy.close()
+    }
+  })
 })

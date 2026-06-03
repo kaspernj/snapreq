@@ -29,6 +29,14 @@ describe("SnapReqHeaders", () => {
     assert.equal(copy.get("authorization"), "Bearer x")
   })
 
+  it("copies from structurally compatible header iterables", () => {
+    const source = new SnapReqHeaders({"X-Source": "yes"})
+    const copy = new SnapReqHeaders([...source])
+
+    assert.deepEqual([...source], [["X-Source", "yes"]])
+    assert.equal(copy.get("x-source"), "yes")
+  })
+
   it("joins array values and skips null/undefined", () => {
     const headers = new SnapReqHeaders({Accept: ["application/json", "text/plain"], "X-None": /** @type {any} */ (null)})
 
