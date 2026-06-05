@@ -126,7 +126,15 @@ export default class SnapReqWebSocketChannel {
     } finally {
       this._resumeReadyOnResume = false
       if (!this._ready) {
-        this._rejectReady?.(new Error(`Subscription closed before acknowledgement: ${reason}`))
+        if (reason === "client_unsubscribe") {
+          // The client itself closed the subscription before the server ack
+          // (e.g. a UI component unmounting right after subscribing). That is a
+          // benign race, not a failure — resolve `ready` so awaiting callers
+          // don't surface a spurious "closed before acknowledgement" error.
+          this._resolveReady?.()
+        } else {
+          this._rejectReady?.(new Error(`Subscription closed before acknowledgement: ${reason}`))
+        }
       }
 
       this._resolveReady = null
