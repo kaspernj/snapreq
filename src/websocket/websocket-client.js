@@ -32,9 +32,15 @@ export default class SnapReqWebSocketClient {
    * @param {number[]} [args.reconnectDelays] - Backoff delays in ms (default: [1000, 2000, 4000, 8000, 15000]).
    * @param {{get: () => string | null | undefined | Promise<string | null | undefined>, set: (sessionId: string) => void | Promise<void>, clear: () => void | Promise<void>}} [args.sessionStore] - Optional sessionId persistence hook surviving reloads (localStorage, a cookie, SQLite, etc.).
    * @param {(value: any) => any} [args.deserialize] - Optional transform applied to a response body inside `response.json()`. Lets an app re-hydrate its own wire format. Defaults to identity.
+   * @param {typeof globalThis.WebSocket} [args.webSocketImplementation] - WebSocket constructor to use instead of `globalThis.WebSocket`. Inject Node's `ws` here to get real WS ping/pong heartbeats and socket `unref` (the browser/undici global exposes neither).
+   * @param {number} [args.heartbeatIntervalMs] - When > 0 and the WebSocket implementation supports `.ping()` (Node `ws`), send a protocol ping every this-many ms and drop the socket if the peer did not pong since the previous ping (so a vanished peer is noticed within ~2× this interval). Default 0 (disabled).
+   * @param {boolean} [args.unref] - When the underlying socket exposes `unref()` (Node `ws`), unref it so an idle connection can never keep the process/event loop alive on its own. Best-effort no-op on browser/undici. Default false.
    */
-  constructor({autoReconnect = true, debug = false, deserialize, networkMonitor, reconnectDelays, sessionStore, url} = /** @type {any} */ ({})) {
-    if (!globalThis.WebSocket) throw new Error("WebSocket global is not available")
+  constructor({autoReconnect = true, debug = false, deserialize, heartbeatIntervalMs = 0, networkMonitor, reconnectDelays, sessionStore, unref = false, url, webSocketImplementation} = /** @type {any} */ ({})) {
+    /** @type {typeof globalThis.WebSocket} */
+    const WebSocketImplementation = webSocketImplementation || globalThis.WebSocket
+
+    if (!WebSocketImplementation) throw new Error("WebSocket implementation is not available")
     if (!url) throw new Error("SnapReqWebSocketClient requires a url")
 
     /** @type {(value: any) => any} */
@@ -42,6 +48,14 @@ export default class SnapReqWebSocketClient {
     /** @type {boolean} */
     this.autoReconnect = autoReconnect
     this.debug = debug
+    /** @type {typeof globalThis.WebSocket} */
+    this._WebSocket = WebSocketImplementation
+    /** @type {boolean} */
+    this._unref = unref
+    /** @type {number} - ms between liveness pings; 0 disables the heartbeat. */
+    this._heartbeatIntervalMs = heartbeatIntervalMs
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._heartbeatTimer = null
     /** @type {number | null} */
     this.disconnectedSince = null
     this.pendingRequests = new Map()
@@ -356,7 +370,7 @@ export default class SnapReqWebSocketClient {
     this.connectionAttempts += 1
 
     this.connectPromise = new Promise((resolve, reject) => {
-      this.socket = new WebSocket(this.url)
+      this.socket = new this._WebSocket(this.url)
 
       const cleanup = () => {
         this.socket?.removeEventListener("open", onOpen)
@@ -365,6 +379,7 @@ export default class SnapReqWebSocketClient {
 
       const onOpen = () => {
         cleanup()
+        this._startSocketKeepalive()
         resolve(undefined)
       }
       const onError = (/** @type {Event & {error?: unknown}} */ event) => {
@@ -426,6 +441,7 @@ export default class SnapReqWebSocketClient {
     this._waitingForOnline = false
     this._cancelPendingReconnect()
     this._teardownNetworkMonitorSubscription()
+    this._stopSocketKeepalive()
 
     if (!this.socket) return
 
@@ -784,7 +800,71 @@ export default class SnapReqWebSocketClient {
    * enabled.
    * @returns {void}
    */
+  /**
+   * Starts the protocol-level liveness heartbeat and applies socket unref, both
+   * best-effort: only the Node `ws` implementation exposes `.ping()`/`.on("pong")`
+   * and an unref-able `_socket`, so on browser/undici these are no-ops. The
+   * heartbeat lets a client notice a peer that silently went away; unref (plus
+   * the unref'd timers) ensures neither the socket nor these timers keep the
+   * process/event loop alive on their own once nothing else is pending.
+   * @returns {void}
+   */
+  _startSocketKeepalive() {
+    const socket = /** @type {any} */ (this.socket)
+
+    if (!socket) return
+
+    if (this._unref && typeof socket._socket?.unref === "function") {
+      socket._socket.unref()
+    }
+
+    this._stopSocketKeepalive()
+
+    if (this._heartbeatIntervalMs <= 0 || typeof socket.ping !== "function" || typeof socket.on !== "function") {
+      return
+    }
+
+    // Standard `ws` heartbeat idiom: each tick, if the peer did not pong since
+    // the previous ping, treat it as gone and drop the socket; otherwise arm the
+    // next window and ping. A pong (sync or async) clears the flag before the
+    // next tick, so a live peer is never dropped.
+    let awaitingPong = false
+
+    socket.on("pong", () => { awaitingPong = false })
+
+    this._heartbeatTimer = globalThis.setInterval(() => {
+      if (awaitingPong) {
+        if (typeof socket.terminate === "function") socket.terminate()
+        else socket.close()
+
+        return
+      }
+
+      awaitingPong = true
+
+      try {
+        socket.ping()
+      } catch {
+        // Socket already closing; the close handler will stop the heartbeat.
+      }
+    }, this._heartbeatIntervalMs)
+
+    if (typeof this._heartbeatTimer.unref === "function") this._heartbeatTimer.unref()
+  }
+
+  /**
+   * Stops the liveness heartbeat timer. Safe to call repeatedly.
+   * @returns {void}
+   */
+  _stopSocketKeepalive() {
+    if (this._heartbeatTimer) {
+      globalThis.clearInterval(this._heartbeatTimer)
+      this._heartbeatTimer = null
+    }
+  }
+
   onClose = () => {
+    this._stopSocketKeepalive()
     this.disconnectedSince ||= Date.now()
     this._resetSessionReadyState()
 
