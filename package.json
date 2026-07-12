@@ -48,7 +48,7 @@
     "eslint-plugin-jsdoc": "^63.0.0",
     "globals": "^17.6.0",
     "release-patch": "^1.0.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "ws": "^8.21.0"
   }
 }
