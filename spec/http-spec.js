@@ -7,6 +7,7 @@ import {PassThrough, Readable} from "node:stream"
 import SnapReq from "../src/snap-req.js"
 import {SnapReqAbortError, SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
 import SnapReqResponse from "../src/response.js"
+import FetchTransport from "../src/transports/fetch-transport.js"
 import {startTestServer} from "./support/test-server.js"
 
 /** @type {Awaited<ReturnType<typeof startTestServer>>} */
@@ -219,6 +220,41 @@ for (const transport of ["node", "fetch"]) {
 }
 
 describe("SnapReq cancellation", () => {
+  it("aborts bodyless fetch response buffering when the body deadline expires", async () => {
+    const originalFetch = globalThis.fetch
+    let fetchSignal
+    let bodyAbortReason
+
+    globalThis.fetch = async (_url, init) => {
+      fetchSignal = init?.signal
+
+      return /** @type {Response} */ (/** @type {unknown} */ ({
+        arrayBuffer: () => new Promise((resolve, reject) => {
+          fetchSignal?.addEventListener("abort", () => {
+            bodyAbortReason = fetchSignal.reason
+            reject(fetchSignal.reason)
+          }, {once: true})
+        }),
+        body: null,
+        headers: {forEach: () => {}},
+        status: 200,
+        statusText: "OK"
+      }))
+    }
+
+    const client = new SnapReq({transport: new FetchTransport()})
+
+    try {
+      const response = await client.get("https://example.test/bodyless", {timeoutMs: 20})
+
+      await assert.rejects(() => response.text(), SnapReqTimeoutError)
+      assert.ok(bodyAbortReason instanceof SnapReqTimeoutError)
+    } finally {
+      client.close()
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it("tears down an unconsumed Node response deadline without an uncaught stream error", async () => {
     const child = spawn(process.execPath, [new URL("./support/unconsumed-response-child.js", import.meta.url).pathname], {
       stdio: ["ignore", "pipe", "pipe"]

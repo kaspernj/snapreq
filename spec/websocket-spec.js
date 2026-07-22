@@ -61,6 +61,63 @@ describe("SnapReqWebSocketClient", () => {
     assert.equal(client.reconnectTimer, null)
   })
 
+  it("closes a shared in-flight socket after every connect waiter times out", async () => {
+    let socket
+    let resolveOpen
+    const opened = new Promise((resolve) => { resolveOpen = resolve })
+
+    class OpenWithoutSessionWebSocket extends EventTarget {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+
+      constructor() {
+        super()
+        this.CONNECTING = OpenWithoutSessionWebSocket.CONNECTING
+        this.OPEN = OpenWithoutSessionWebSocket.OPEN
+        this.CLOSING = OpenWithoutSessionWebSocket.CLOSING
+        this.CLOSED = OpenWithoutSessionWebSocket.CLOSED
+        this.readyState = this.CONNECTING
+        this.closeCalls = 0
+        socket = this
+
+        queueMicrotask(() => {
+          this.readyState = this.OPEN
+          this.dispatchEvent(new Event("open"))
+          resolveOpen()
+        })
+      }
+
+      close() {
+        this.closeCalls += 1
+        this.readyState = this.CLOSED
+        this.dispatchEvent(new Event("close"))
+      }
+
+      send() {}
+    }
+
+    const client = new SnapReqWebSocketClient({
+      url: "ws://shared-timeout.test",
+      autoReconnect: true,
+      reconnectDelays: [1],
+      webSocketImplementation: /** @type {any} */ (OpenWithoutSessionWebSocket)
+    })
+    const firstConnect = client.connect({timeoutMs: 20})
+
+    await opened
+    const secondConnect = client.connect({timeoutMs: 30})
+
+    await assert.rejects(firstConnect, TimeoutError)
+    await assert.rejects(secondConnect, TimeoutError)
+    assert.equal(socket.closeCalls, 1)
+    assert.equal(client.socket, undefined)
+    assert.equal(client.connectPromise, undefined)
+    assert.equal(client._connectWaiters, 0)
+    assert.equal(client.reconnectTimer, null)
+  })
+
   it("does not clear a newer connect while a failed socket finishes closing", async () => {
     const sockets = []
     let releaseFirstClose

@@ -46,7 +46,18 @@ export default class FetchTransport {
       headers: request.headers.toObject()
     }
 
-    if (request.signal) init.signal = request.signal
+    const bodyController = new AbortController()
+    const requestSignal = request.signal
+    const forwardAbort = () => bodyController.abort(requestSignal?.reason)
+    const finishBodyControl = () => requestSignal?.removeEventListener("abort", forwardAbort)
+
+    if (requestSignal?.aborted) {
+      forwardAbort()
+    } else {
+      requestSignal?.addEventListener("abort", forwardAbort, {once: true})
+    }
+
+    init.signal = bodyController.signal
     if (request.credentials) init.credentials = request.credentials
 
     const body = request.body
@@ -65,12 +76,19 @@ export default class FetchTransport {
     try {
       fetchResponse = await fetch(request.url, init)
     } catch (error) {
+      requestSignal?.removeEventListener("abort", forwardAbort)
       if (error instanceof Error && error.name === "AbortError") throw new SnapReqAbortError()
 
       throw error
     }
 
-    const responseStream = this._responseStream(fetchResponse)
+    const responseStream = this._responseStream(fetchResponse, {
+      cancel: (reason) => {
+        bodyController.abort(reason)
+        finishBodyControl()
+      },
+      onDone: finishBodyControl
+    })
 
     return new SnapReqResponse({
       url: request.url,
@@ -100,9 +118,10 @@ export default class FetchTransport {
    * `ReadableStream` body for true streaming when present and otherwise buffers
    * the whole body once so the stream interface stays identical everywhere.
    * @param {Response} response - The fetch response.
+   * @param {{cancel: (reason?: unknown) => void, onDone: () => void}} control - Body lifetime controls.
    * @returns {AsyncIterable<Uint8Array> & {cancel?: (reason?: unknown) => void}} - The response body stream.
    */
-  _responseStream(response) {
+  _responseStream(response, control) {
     const body = response.body
 
     if (body && typeof body.getReader === "function") {
@@ -127,6 +146,7 @@ export default class FetchTransport {
             }
             reader.releaseLock?.()
           }
+          control.onDone()
         }
       })()
 
@@ -139,10 +159,18 @@ export default class FetchTransport {
       return cancellable
     }
 
-    return (async function* () {
-      const buffer = await response.arrayBuffer()
+    const iterable = (async function* () {
+      try {
+        const buffer = await response.arrayBuffer()
 
-      yield new Uint8Array(buffer)
+        yield new Uint8Array(buffer)
+      } finally {
+        control.onDone()
+      }
     })()
+    const cancellable = /** @type {AsyncIterable<Uint8Array> & {cancel: (reason?: unknown) => void}} */ (/** @type {unknown} */ (iterable))
+
+    cancellable.cancel = control.cancel
+    return cancellable
   }
 }

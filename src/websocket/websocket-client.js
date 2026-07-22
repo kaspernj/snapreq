@@ -354,13 +354,12 @@ export default class SnapReqWebSocketClient {
    * @returns {Promise<void>} - Resolves once connected and the session is ready.
    */
   async connect({autoReconnect = this.autoReconnect, waitForOnline = true, resetReconnectState = true, timeoutMs, signal} = {}) {
-    const socketBeforeConnect = this.socket
     this._connectWaiters += 1
 
     try {
       await runControlled({timeoutMs, signal}, () => this._connect({autoReconnect, waitForOnline, resetReconnectState}))
     } catch (error) {
-      if (this.socket && this.socket !== socketBeforeConnect && this._connectWaiters === 1) {
+      if (this.socket && this._connectWaiters === 1) {
         const failedSocket = this.socket
 
         failedSocket.removeEventListener("message", this.onMessage)
