@@ -131,7 +131,13 @@ export default class NodeTransport {
       }
 
       let settled = false
-      const abort = () => req.destroy(new SnapReqAbortError())
+      const abort = () => {
+        const error = new SnapReqAbortError()
+
+        requestBody.stream?.unpipe(req)
+        if (requestBody.ownedStream) requestBody.stream?.destroy(error)
+        req.destroy(error)
+      }
       const removeAbortListener = () => request.signal?.removeEventListener("abort", abort)
 
       const req = httpModule.request(requestOptions, (res) => {
@@ -153,10 +159,24 @@ export default class NodeTransport {
         // Re-point the abort listener at the response stream so aborting after
         // headers arrive tears down the body stream rather than the request.
         removeAbortListener()
-        const abortStream = () => responseStream.destroy(new SnapReqAbortError())
+        const cancelResponse = (/** @type {Error} */ error) => {
+          responseStream.destroy(error)
+          if (responseStream !== res) res.destroy(error)
+        }
+        const abortStream = () => cancelResponse(new SnapReqAbortError())
 
         request.signal?.addEventListener("abort", abortStream, {once: true})
         responseStream.on("close", () => request.signal?.removeEventListener("abort", abortStream))
+
+        // Cancellation may own and destroy a response body before the caller
+        // starts consuming it. Keep that intentional stream error from being
+        // process-fatal; async iteration still observes and rejects with it.
+        const handleOwnedResponseError = () => {}
+
+        for (const ownedStream of new Set([res, responseStream])) {
+          ownedStream.on("error", handleOwnedResponseError)
+          ownedStream.once("close", () => ownedStream.removeListener("error", handleOwnedResponseError))
+        }
 
         settled = true
         resolve(new SnapReqResponse({
@@ -166,11 +186,21 @@ export default class NodeTransport {
           statusText: res.statusMessage || "",
           headers: this._responseHeaders(res),
           stream: responseStream,
-          nodeStream: responseStream
+          nodeStream: responseStream,
+          cancelBody: (error) => cancelResponse(/** @type {Error} */ (error))
         }))
       })
 
       request.signal?.addEventListener("abort", abort, {once: true})
+
+      const onRequestBodyError = (/** @type {Error} */ error) => req.destroy(error)
+
+      requestBody.stream?.on("error", onRequestBodyError)
+      if (requestBody.ownedStream) {
+        requestBody.stream?.once("close", () => requestBody.stream?.removeListener("error", onRequestBodyError))
+      } else {
+        req.on("close", () => requestBody.stream?.removeListener("error", onRequestBodyError))
+      }
 
       req.on("error", (/** @type {unknown} */ error) => {
         removeAbortListener()
@@ -195,23 +225,25 @@ export default class NodeTransport {
    * @param {import("../snap-req.js").NormalizedRequest} request - Normalized request.
    * @param {SnapReqHeaders} headers - Headers, mutated with Content-Length / Content-Encoding.
    * @param {{zlib: any, stream: any}} modules - Node modules.
-   * @returns {{buffer: Buffer | null, stream: import("node:stream").Readable | null}} - Prepared body.
+   * @returns {{buffer: Buffer | null, stream: import("node:stream").Readable | null, ownedStream: boolean}} - Prepared body.
    */
   _prepareRequestBody(request, headers, {zlib, stream}) {
     const compression = request.bodyCompression || "identity"
     const body = request.body
 
-    if (body.kind === "none") return {buffer: null, stream: null}
+    if (body.kind === "none") return {buffer: null, stream: null, ownedStream: false}
 
     /** @type {Buffer | null} */
     let buffer = null
     /** @type {import("node:stream").Readable | null} */
     let bodyStream = null
+    let ownedStream = false
 
     if (body.kind === "stream") {
       const value = /** @type {any} */ (body.value)
 
-      bodyStream = typeof value.pipe === "function" ? value : stream.Readable.from(value)
+      ownedStream = typeof value.pipe !== "function"
+      bodyStream = ownedStream ? stream.Readable.from(value) : value
     } else if (body.kind === "bytes") {
       buffer = Buffer.from(/** @type {Uint8Array} */ (body.value))
     } else {
@@ -221,7 +253,7 @@ export default class NodeTransport {
     if (compression === "identity") {
       if (buffer) headers.set("Content-Length", String(buffer.length))
 
-      return {buffer, stream: bodyStream}
+      return {buffer, stream: bodyStream, ownedStream}
     }
 
     if (headers.has("content-encoding")) {
@@ -237,10 +269,16 @@ export default class NodeTransport {
     const compressor = this._requestCompressor(compression, zlib)
     const source = bodyStream || stream.Readable.from(/** @type {Buffer} */ (buffer))
 
-    source.on("error", (/** @type {Error} */ error) => compressor.destroy(error))
+    const forwardError = (/** @type {Error} */ error) => compressor.destroy(error)
+
+    source.on("error", forwardError)
+    compressor.once("close", () => {
+      source.unpipe(compressor)
+      source.removeListener("error", forwardError)
+    })
     source.pipe(compressor)
 
-    return {buffer: null, stream: compressor}
+    return {buffer: null, stream: compressor, ownedStream: true}
   }
 
   /**

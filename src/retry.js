@@ -1,6 +1,7 @@
 // @ts-check
 
-import {SnapReqHttpError, SnapReqTimeoutError} from "./errors.js"
+import {SnapReqTimeoutError} from "./errors.js"
+import retry from "awaitery/build/retry.js"
 
 const RETRYABLE_ERROR_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENOENT", "ETIMEDOUT", "EPIPE"])
 const DEFAULT_RETRYABLE_STATUSES = [502, 503, 504]
@@ -60,48 +61,52 @@ export function normalizeRetryOptions(retry) {
   }
 }
 
-/**
- * @param {number} waitMs - Delay in milliseconds.
- * @returns {Promise<void>} - Resolves after the delay.
- */
-function wait(waitMs) {
-  return new Promise((resolve) => setTimeout(resolve, waitMs))
+class RetryableResponse extends Error {
+  /** @param {import("./response.js").default} response - Retryable response. */
+  constructor(response) {
+    super(`Retryable HTTP status ${response.status}`)
+    this.response = response
+  }
 }
 
 /**
  * Runs a request attempt, retrying transient network errors and retryable HTTP
  * statuses. Retries are only used for buffered requests — the caller must not
  * apply this to streamed responses.
- * @param {() => Promise<import("./response.js").default>} attempt - Performs one request attempt.
- * @param {NormalizedRetryOptions} retry - Normalized retry settings.
+ * @param {(signal: AbortSignal | undefined) => Promise<import("./response.js").default>} attempt - Performs one request attempt.
+ * @param {NormalizedRetryOptions} retryOptions - Normalized retry settings.
+ * @param {AbortSignal} [signal] - Caller cancellation signal.
  * @returns {Promise<import("./response.js").default>} - The successful (or final) response.
  */
-export async function runWithRetry(attempt, retry) {
-  for (let tryNumber = 1; tryNumber <= retry.tries; tryNumber += 1) {
-    /** @type {import("./response.js").default} */
-    let response
+export async function runWithRetry(attempt, retryOptions, signal) {
+  try {
+    return await retry({
+      tries: retryOptions.tries,
+      wait: retryOptions.waitMs,
+      signal,
+      shouldRetry: ({error, tryNumber}) => {
+        if (error instanceof RetryableResponse) {
+          // Awaitery calls shouldRetry only when another attempt is available,
+          // and before its retry delay. The final response therefore remains
+          // caller-owned while every intermediate body is released promptly.
+          error.response._abortBody(error)
+          return true
+        }
 
-    try {
-      response = await attempt()
-    } catch (error) {
-      if (tryNumber >= retry.tries || !retry.shouldRetry(error, tryNumber)) throw error
+        return retryOptions.shouldRetry(error, tryNumber)
+      }
+    }, async ({signal: attemptSignal} = /** @type {any} */ ({})) => {
+      const response = await attempt(attemptSignal)
 
-      await wait(retry.waitMs)
-      continue
-    }
+      if (retryOptions.retryableStatuses.includes(response.status)) {
+        throw new RetryableResponse(response)
+      }
 
-    if (tryNumber < retry.tries && retry.retryableStatuses.includes(response.status)) {
-      await wait(retry.waitMs)
-      continue
-    }
+      return response
+    })
+  } catch (error) {
+    if (error instanceof RetryableResponse) return error.response
 
-    return response
+    throw error
   }
-
-  throw new SnapReqHttpError({
-    message: "Retry loop exited without a response.",
-    method: "",
-    url: "",
-    status: 0
-  })
 }

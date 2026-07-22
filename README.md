@@ -76,7 +76,7 @@ new SnapReq({
 
 ### Timeouts
 
-Set `timeoutMs` on the client or a single request to abort stalled requests. The timeout covers the response headers and body reads through `json()`, `text()`, `bytes()`, `buffer()`, or `stream()`. A timed-out request rejects with `SnapReqTimeoutError`.
+Set `timeoutMs` on the client or a single request to abort stalled requests. The timeout covers one request attempt, including response headers and body reads through `json()`, `text()`, `bytes()`, `buffer()`, or `stream()`. A timed-out request rejects with `SnapReqTimeoutError`; caller `signal` cancellation rejects with `SnapReqAbortError`. Both controls cooperatively abort the active transport and interrupt retry waits without starting another attempt.
 
 ```js
 const client = new SnapReq({baseUrl: "https://api.example.com", timeoutMs: 120000})
@@ -147,20 +147,23 @@ import SnapReqWebSocketClient from "snapreq/websocket"
 
 const client = new SnapReqWebSocketClient({url: "wss://example.com/websocket"})
 
-await client.connect()
+const controller = new AbortController()
+await client.connect({timeoutMs: 5000, signal: controller.signal})
 
 // Request/response over the socket
-const response = await client.post("/things", {name: "thing"})
+const response = await client.post("/things", {name: "thing"}, {timeoutMs: 5000, signal: controller.signal})
 response.json()
 
 // Channel subscription
-const unsubscribe = await client.subscribeAndWait("updates", {}, (payload) => console.log(payload))
+const unsubscribe = await client.subscribeAndWait("updates", {timeoutMs: 5000, signal: controller.signal}, (payload) => console.log(payload))
 
 // 1:1 connection
-const connection = client.openConnection("ChatConnection", {onMessage: (body) => console.log(body)})
+const connection = client.openConnection("ChatConnection", {timeoutMs: 5000, signal: controller.signal, onMessage: (body) => console.log(body)})
 await connection.ready
 connection.sendMessage({text: "hi"})
 ```
+
+`timeoutMs` and `signal` are also accepted by `get`, `request`, `subscribe`, `subscribeChannel`, and `waitForReady`. WebSocket timeouts intentionally reject with Awaitery's `TimeoutError`, while WebSocket cancellation rejects with the exact `signal.reason`; unlike HTTP operations, these errors are not mapped to SnapReq error classes. A failed connect deadline closes only a socket created solely for that operation; a shared in-flight socket remains alive for other connect-dependent operations. Request and readiness failures remove only their own pending entry or handle.
 
 Optional adapters: `networkMonitor` (gate reconnects on online state), `sessionStore` (persist the session id across reloads) and `deserialize` (a `(value) => value` transform applied inside `response.json()` so an app can re-hydrate its own wire format).
 

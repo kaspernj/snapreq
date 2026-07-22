@@ -1,5 +1,7 @@
 // @ts-check
 
+import {runControlled} from "../control.js"
+
 /**
  * Client-side handle for a 1:1 connection opened via
  * `SnapReqWebSocketClient.openConnection()`. Mirrors the server's connection
@@ -13,13 +15,15 @@ export default class SnapReqWebSocketConnection {
    * @param {string} args.connectionId - Generated id unique within the session.
    * @param {string} args.connectionType - Name the server registered the class under.
    * @param {Record<string, any>} [args.params] - Opaque params forwarded to the server.
+   * @param {number} [args.timeoutMs] - Server-confirmed readiness deadline.
+   * @param {AbortSignal} [args.signal] - Cancels readiness without affecting other handles.
    * @param {() => void} [args.onConnect] - Fired after the server confirms `connection-opened`.
    * @param {(body: any) => void} [args.onMessage] - Fired on each `connection-message` from the server.
    * @param {() => void} [args.onDisconnect] - Fired when the socket drops; connection is preserved pending resume.
    * @param {() => void} [args.onResume] - Fired when the session successfully resumes after a drop.
    * @param {(reason: string) => void} [args.onClose] - Fired exactly once when the handle closes permanently.
    */
-  constructor({client, connectionId, connectionType, params, onConnect, onMessage, onDisconnect, onResume, onClose}) {
+  constructor({client, connectionId, connectionType, params, timeoutMs, signal, onConnect, onMessage, onDisconnect, onResume, onClose}) {
     this.client = client
     this.connectionId = connectionId
     this.connectionType = connectionType
@@ -33,9 +37,14 @@ export default class SnapReqWebSocketConnection {
     this._closed = false
 
     /** @type {Promise<void>} - Resolves once the server sends `connection-opened`. */
-    this.ready = new Promise((resolve, reject) => {
+    const readiness = new Promise((resolve, reject) => {
       this._resolveReady = resolve
       this._rejectReady = reject
+    })
+    this.ready = runControlled({timeoutMs, signal}, () => readiness).catch((error) => {
+      if (!this._closed) this.close()
+
+      throw error
     })
   }
 
