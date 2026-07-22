@@ -42,8 +42,9 @@ export default class SnapReqResponse {
    * @param {import("node:stream").Readable} [options.nodeStream] - Raw Node stream, when available, for advanced consumers.
    * @param {() => void} [options.onBodyDone] - Callback fired when body reading finishes or fails.
    * @param {(error: unknown) => unknown} [options.mapBodyError] - Maps body read errors before rethrowing.
+   * @param {(error: unknown) => void} [options.cancelBody] - Cancels transport-owned body resources.
    */
-  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, mapBodyError}) {
+  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, mapBodyError, cancelBody}) {
     this.url = url
     this.method = method
     this.status = status
@@ -59,6 +60,9 @@ export default class SnapReqResponse {
     this._bodyDone = false
     this._onBodyDone = onBodyDone
     this._mapBodyError = mapBodyError
+    this._cancelBody = cancelBody
+    /** @type {unknown | null} */
+    this._bodyAbortError = null
 
     if (bytes !== undefined) this._finishBody()
   }
@@ -168,6 +172,7 @@ export default class SnapReqResponse {
         for await (const chunk of source) {
           yield chunk
         }
+        if (response._bodyAbortError) throw response._bodyAbortError
       } catch (error) {
         throw response._mappedBodyError(error)
       } finally {
@@ -193,5 +198,22 @@ export default class SnapReqResponse {
     this._bodyDone = true
 
     if (this._onBodyDone) this._onBodyDone()
+  }
+
+  /**
+   * @param {unknown} error - Cancellation reason.
+   * @returns {void}
+   */
+  _abortBody(error) {
+    if (this._bodyDone) return
+    this._bodyAbortError = error
+    try {
+      this._cancelBody?.(error)
+    } finally {
+      // Cancellation owns the transport body from this point onward. Mark it
+      // terminal even when cancellation throws so deadline watchdogs settle
+      // exactly once and cannot abort the same body again later.
+      this._finishBody()
+    }
   }
 }

@@ -1,5 +1,7 @@
 // @ts-check
 
+import {runControlled} from "../control.js"
+
 /**
  * Client-side handle for a channel subscription opened via
  * `SnapReqWebSocketClient.subscribeChannel()`. Mirrors the server's
@@ -14,12 +16,14 @@ export default class SnapReqWebSocketChannel {
    * @param {string} args.channelType - Name the server registered the channel under.
    * @param {Record<string, any>} [args.params] - Opaque params forwarded to the server.
    * @param {string} [args.lastEventId] - Resume replay from this event id.
+   * @param {number} [args.timeoutMs] - Server-confirmed readiness deadline.
+   * @param {AbortSignal} [args.signal] - Cancels readiness without affecting other subscriptions.
    * @param {(body: any) => void} [args.onMessage] - Fired on each `channel-message` from the server.
    * @param {() => void} [args.onDisconnect] - Fired when the socket drops.
    * @param {() => void} [args.onResume] - Fired when the session resumes after a drop.
    * @param {(reason: string) => void} [args.onClose] - Fired exactly once when the subscription closes permanently.
    */
-  constructor({client, subscriptionId, channelType, params, lastEventId, onMessage, onDisconnect, onResume, onClose}) {
+  constructor({client, subscriptionId, channelType, params, lastEventId, timeoutMs, signal, onMessage, onDisconnect, onResume, onClose}) {
     this.client = client
     this.subscriptionId = subscriptionId
     this.channelType = channelType
@@ -34,6 +38,9 @@ export default class SnapReqWebSocketChannel {
     this._subscribed = false
     this._subscribeSent = false
     this._closed = false
+    this._readyControls = {timeoutMs, signal}
+    /** @type {Promise<void> | null} */
+    this._controlledReadyPromise = null
   }
 
   /** @returns {Promise<void>} - Resolves once the subscription is acknowledged. */
@@ -51,7 +58,15 @@ export default class SnapReqWebSocketChannel {
 
   /** @returns {Promise<void>} - Resolves once the subscription is acknowledged. */
   get ready() {
-    return this._ensureReadyPromise()
+    if (!this._controlledReadyPromise) {
+      this._controlledReadyPromise = runControlled(this._readyControls, () => this._ensureReadyPromise()).catch((error) => {
+        if (!this._closed) this.close()
+
+        throw error
+      })
+    }
+
+    return this._controlledReadyPromise
   }
 
   /** @returns {void} */
@@ -143,18 +158,18 @@ export default class SnapReqWebSocketChannel {
   }
 
   /**
-   * @param {{timeoutMs?: number}} [params] - Options.
-   * @returns {Promise<void>} - Resolves once ready or rejects on timeout.
+   * @param {{timeoutMs?: number, signal?: AbortSignal}} [params] - Operation controls, overriding constructor controls.
+   * @returns {Promise<void>} - Resolves once ready or rejects on timeout/cancellation.
    */
-  async waitForReady({timeoutMs = 5000} = {}) {
+  async waitForReady({timeoutMs = 5000, signal} = {}) {
     if (this._ready) return
 
-    const readyPromise = this._ensureReadyPromise()
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`Subscription not ready after ${timeoutMs}ms`)), timeoutMs)
-    })
-
-    await Promise.race([readyPromise, timeoutPromise])
+    try {
+      await runControlled({timeoutMs, signal}, () => this._ensureReadyPromise())
+    } catch (error) {
+      if (!this._closed) this.close()
+      throw error
+    }
   }
 
   /** @returns {void} */

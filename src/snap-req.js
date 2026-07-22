@@ -1,10 +1,12 @@
 // @ts-check
 
-import {SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "./errors.js"
+import {SnapReqAbortError, SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "./errors.js"
 import SnapReqHeaders from "./headers.js"
 import {buildUrl, normalizeBody} from "./request.js"
 import {normalizeRetryOptions, runWithRetry} from "./retry.js"
 import {selectTransport} from "./transports/select.js"
+import {runControlled} from "./control.js"
+import {TimeoutError} from "awaitery/build/timeout.js"
 
 /**
  * @typedef {import("./request.js").CompressionEncoding} CompressionEncoding
@@ -36,14 +38,6 @@ import {selectTransport} from "./transports/select.js"
  * @property {string} [credentials] - Fetch credentials mode.
  * @property {boolean | import("./retry.js").RetryOptions} [retry] - Retry transient failures.
  * @property {boolean} [throwOnError] - Throw `SnapReqHttpError` on non-2xx responses.
- */
-
-/**
- * @typedef {object} RequestTimeout
- * @property {AbortSignal | undefined} signal - Signal to use for the request.
- * @property {() => void} clear - Clears timeout resources.
- * @property {(response: import("./response.js").default, request: NormalizedRequest) => import("./response.js").default} response - Attaches timeout handling to a response.
- * @property {(error: unknown, request: NormalizedRequest) => unknown} error - Maps a thrown error.
  */
 
 /**
@@ -128,94 +122,6 @@ export default class SnapReq {
   }
 
   /**
-   * @param {RequestOptions} options - Request options.
-   * @returns {RequestTimeout} - Timeout handling for one request attempt.
-   */
-  _requestTimeout(options) {
-    const timeoutMs = options.timeoutMs ?? this.timeoutMs
-
-    if (!timeoutMs || timeoutMs <= 0) {
-      return {
-        signal: options.signal,
-        clear: () => {},
-        response: (response) => response,
-        error: (error) => error
-      }
-    }
-
-    const timeoutController = new AbortController()
-    const composedSignal = this._composeSignal(options.signal, timeoutController.signal)
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      timeoutController.abort()
-    }, timeoutMs)
-
-    if (typeof timer.unref === "function") timer.unref()
-
-    const clear = () => {
-      clearTimeout(timer)
-      composedSignal.clear()
-    }
-    const toError = (error, request) => {
-      if (timedOut) {
-        return new SnapReqTimeoutError({
-          method: request.method,
-          url: request.url,
-          timeoutMs
-        })
-      }
-
-      return error
-    }
-
-    return {
-      signal: composedSignal.signal,
-      clear,
-      response: (response, request) => {
-        if (response._bodyDone) {
-          clear()
-
-          return response
-        }
-
-        response._onBodyDone = this._chainBodyDone(response._onBodyDone, clear)
-        response._mapBodyError = this._chainBodyError(response._mapBodyError, (error) => toError(error, request))
-
-        return response
-      },
-      error: toError
-    }
-  }
-
-  /**
-   * @param {AbortSignal | undefined} callerSignal - Caller-supplied signal.
-   * @param {AbortSignal} timeoutSignal - Timeout signal.
-   * @returns {{signal: AbortSignal, clear: () => void}} - Signal that aborts when either source aborts.
-   */
-  _composeSignal(callerSignal, timeoutSignal) {
-    if (!callerSignal) return {signal: timeoutSignal, clear: () => {}}
-
-    const controller = new AbortController()
-    const abort = () => controller.abort()
-
-    if (callerSignal.aborted || timeoutSignal.aborted) {
-      controller.abort()
-    } else {
-      callerSignal.addEventListener("abort", abort, {once: true})
-      timeoutSignal.addEventListener("abort", abort, {once: true})
-    }
-
-    return {
-      signal: controller.signal,
-      clear: () => {
-        callerSignal.removeEventListener("abort", abort)
-        timeoutSignal.removeEventListener("abort", abort)
-      }
-    }
-  }
-
-  /**
    * @param {(() => void) | undefined} existing - Existing body-done callback.
    * @param {() => void} next - Callback to add.
    * @returns {() => void} - Combined callback.
@@ -225,15 +131,6 @@ export default class SnapReq {
       if (existing) existing()
       next()
     }
-  }
-
-  /**
-   * @param {((error: unknown) => unknown) | undefined} existing - Existing error mapper.
-   * @param {(error: unknown) => unknown} next - Mapper to add.
-   * @returns {(error: unknown) => unknown} - Combined mapper.
-   */
-  _chainBodyError(existing, next) {
-    return (error) => next(existing ? existing(error) : error)
   }
 
   /**
@@ -249,8 +146,18 @@ export default class SnapReq {
     const retry = normalizeRetryOptions(options.retry ?? this.defaultRetry)
     const body = normalizeBody(options.body, new SnapReqHeaders(options.headers))
     const canRetry = retry && body.kind !== "stream"
-    const attempt = async () => this._requestWithTimeout(options, (request) => transport.performRequest(request))
-    const response = canRetry ? await runWithRetry(attempt, /** @type {any} */ (retry)) : await attempt()
+    const attempt = async (signal = options.signal) => this._requestWithTimeout({...options, signal}, (request) => transport.performRequest(request))
+    let response
+
+    try {
+      response = canRetry
+        ? await runWithRetry(attempt, /** @type {any} */ (retry), options.signal)
+        : await attempt()
+    } catch (error) {
+      if (options.signal?.aborted) throw new SnapReqAbortError()
+
+      throw error
+    }
 
     if (throwOnError && !response.ok) throw await this._httpError(response, this._normalize(options))
 
@@ -289,18 +196,57 @@ export default class SnapReq {
    * @returns {Promise<import("./response.js").default>} - Response with timeout handling attached.
    */
   async _requestWithTimeout(options, performRequest) {
-    const timeout = this._requestTimeout(options)
-    const normalized = this._normalize({...options, signal: timeout.signal})
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs
+    const startedAt = Date.now()
+    /** @type {NormalizedRequest} */
+    let normalized = this._normalize(options)
 
     try {
-      const response = await performRequest(normalized)
+      const response = await runControlled({timeoutMs, signal: options.signal}, async (signal) => {
+        normalized = this._normalize({...options, signal})
+        return await performRequest(normalized)
+      })
 
-      return timeout.response(response, normalized)
+      const mapBodyError = response._mapBodyError
+
+      response._mapBodyError = (error) => {
+        if (options.signal?.aborted) return new SnapReqAbortError()
+
+        return mapBodyError ? mapBodyError(error) : error
+      }
+
+      if (timeoutMs && timeoutMs > 0 && !response._bodyDone) {
+        const remaining = Math.max(1, timeoutMs - (Date.now() - startedAt))
+        /** @type {() => void} */
+        let finish
+        const bodyDone = new Promise((resolve) => { finish = () => resolve(undefined) })
+
+        response._onBodyDone = this._chainBodyDone(response._onBodyDone, finish)
+        void runControlled({timeoutMs: remaining, signal: options.signal}, () => bodyDone).catch((error) => {
+          response._abortBody(this._requestControlError(error, normalized, timeoutMs, options.signal))
+        })
+      }
+
+      return response
     } catch (error) {
-      timeout.clear()
-
-      throw timeout.error(error, normalized)
+      throw this._requestControlError(error, normalized, timeoutMs, options.signal)
     }
+  }
+
+  /**
+   * @param {unknown} error - Awaitery/transport error.
+   * @param {NormalizedRequest} request - Request metadata.
+   * @param {number | undefined} timeoutMs - Attempt timeout.
+   * @param {AbortSignal | undefined} callerSignal - Caller cancellation.
+   * @returns {unknown} - Stable public Snapreq error.
+   */
+  _requestControlError(error, request, timeoutMs, callerSignal) {
+    if (callerSignal?.aborted) return new SnapReqAbortError()
+    if (error instanceof TimeoutError && timeoutMs) {
+      return new SnapReqTimeoutError({method: request.method, url: request.url, timeoutMs})
+    }
+
+    return error
   }
 
   /**

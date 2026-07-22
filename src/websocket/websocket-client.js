@@ -2,6 +2,7 @@
 
 import SnapReqWebSocketConnection from "./websocket-connection.js"
 import SnapReqWebSocketChannel from "./websocket-channel.js"
+import {runControlled} from "../control.js"
 
 const DEFAULT_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000]
 
@@ -120,6 +121,12 @@ export default class SnapReqWebSocketClient {
 
     /** @type {boolean} */
     this._waitingForOnline = false
+
+    /** @type {number} - Operations currently depending on the shared in-flight connect. */
+    this._connectWaiters = 0
+
+    /** @type {WeakSet<object>} - Sockets whose terminal lifecycle has already been processed. */
+    this._closedSockets = new WeakSet()
   }
 
   /** @returns {boolean} - Whether the socket is open. */
@@ -136,7 +143,7 @@ export default class SnapReqWebSocketClient {
    * Opens a 1:1 connection of the given type against the server. Requires the
    * socket to already be connected (call `connect()` first).
    * @param {string} connectionType - Name the server registered the class under.
-   * @param {{params?: Record<string, any>, onConnect?: () => void, onMessage?: (body: any) => void, onDisconnect?: () => void, onResume?: () => void, onClose?: (reason: string) => void}} [options] - Connection options.
+   * @param {{params?: Record<string, any>, timeoutMs?: number, signal?: AbortSignal, onConnect?: () => void, onMessage?: (body: any) => void, onDisconnect?: () => void, onResume?: () => void, onClose?: (reason: string) => void}} [options] - Connection options.
    * @returns {SnapReqWebSocketConnection} - The connection handle.
    */
   openConnection(connectionType, options = {}) {
@@ -148,6 +155,8 @@ export default class SnapReqWebSocketClient {
       connectionId,
       connectionType,
       params: options.params,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
       onConnect: options.onConnect,
       onMessage: options.onMessage,
       onDisconnect: options.onDisconnect,
@@ -179,7 +188,7 @@ export default class SnapReqWebSocketClient {
    * Subscribes to a named channel. If the socket is not yet open, the
    * subscription is queued and sent once a connection is established.
    * @param {string} channelType - Name the server registered the channel under.
-   * @param {{params?: Record<string, any>, lastEventId?: string, onMessage?: (body: any) => void, onDisconnect?: () => void, onResume?: () => void, onClose?: (reason: string) => void}} [options] - Subscription options.
+   * @param {{params?: Record<string, any>, lastEventId?: string, timeoutMs?: number, signal?: AbortSignal, onMessage?: (body: any) => void, onDisconnect?: () => void, onResume?: () => void, onClose?: (reason: string) => void}} [options] - Subscription options.
    * @returns {SnapReqWebSocketChannel} - The subscription handle.
    */
   subscribeChannel(channelType, options = {}) {
@@ -190,6 +199,8 @@ export default class SnapReqWebSocketClient {
       channelType,
       lastEventId: options.lastEventId,
       params: options.params,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
       onMessage: options.onMessage,
       onDisconnect: options.onDisconnect,
       onResume: options.onResume,
@@ -339,10 +350,48 @@ export default class SnapReqWebSocketClient {
   /**
    * Ensures a WebSocket connection is open. Auto-reconnect and online gating are
    * enabled by default.
-   * @param {{autoReconnect?: boolean, waitForOnline?: boolean, resetReconnectState?: boolean}} [options] - Connect options.
+   * @param {{autoReconnect?: boolean, waitForOnline?: boolean, resetReconnectState?: boolean, timeoutMs?: number, signal?: AbortSignal}} [options] - Connect options.
    * @returns {Promise<void>} - Resolves once connected and the session is ready.
    */
-  async connect({autoReconnect = this.autoReconnect, waitForOnline = true, resetReconnectState = true} = {}) {
+  async connect({autoReconnect = this.autoReconnect, waitForOnline = true, resetReconnectState = true, timeoutMs, signal} = {}) {
+    const socketBeforeConnect = this.socket
+    this._connectWaiters += 1
+
+    try {
+      await runControlled({timeoutMs, signal}, () => this._connect({autoReconnect, waitForOnline, resetReconnectState}))
+    } catch (error) {
+      if (this.socket && this.socket !== socketBeforeConnect && this._connectWaiters === 1) {
+        const failedSocket = this.socket
+
+        failedSocket.removeEventListener("message", this.onMessage)
+        failedSocket.removeEventListener("close", this.onClose)
+        this._stopSocketKeepalive()
+        this._handleSocketClose(failedSocket, error, false)
+
+        if (failedSocket.readyState !== failedSocket.CLOSED) {
+          await new Promise((resolve) => {
+            failedSocket.addEventListener("close", () => resolve(undefined), {once: true})
+            failedSocket.close()
+          })
+        }
+
+        if (this.socket === failedSocket) this.socket = undefined
+      }
+
+      throw error
+    } finally {
+      this._connectWaiters -= 1
+    }
+  }
+
+  /**
+   * @param {object} [options] - Internal connect options.
+   * @param {boolean} [options.autoReconnect] - Whether reconnect remains enabled.
+   * @param {boolean} [options.waitForOnline] - Whether to honor the online gate.
+   * @param {boolean} [options.resetReconnectState] - Whether to reset backoff state.
+   * @returns {Promise<void>} - Opens the socket and waits for session readiness.
+   */
+  async _connect({autoReconnect = this.autoReconnect, waitForOnline = true, resetReconnectState = true} = {}) {
     this.autoReconnect = autoReconnect
 
     if (this.autoReconnect) {
@@ -362,7 +411,7 @@ export default class SnapReqWebSocketClient {
       this.reconnectAttempt = 0
     }
 
-    if (this.socket && this.socket.readyState === this.socket.OPEN) return
+    if (this.socket && this.socket.readyState === this.socket.OPEN) return await this._waitForSessionReady()
     if (this.connectPromise) return this.connectPromise
 
     this._resetSessionReadyState()
@@ -375,6 +424,7 @@ export default class SnapReqWebSocketClient {
       const cleanup = () => {
         this.socket?.removeEventListener("open", onOpen)
         this.socket?.removeEventListener("error", onError)
+        this.socket?.removeEventListener("close", onCloseBeforeOpen)
       }
 
       const onOpen = () => {
@@ -387,9 +437,14 @@ export default class SnapReqWebSocketClient {
         const error = event?.error || new Error("Websocket connection error")
         reject(error)
       }
+      const onCloseBeforeOpen = () => {
+        cleanup()
+        reject(new Error("Websocket closed before opening"))
+      }
 
       this.socket.addEventListener("open", onOpen)
       this.socket.addEventListener("error", onError)
+      this.socket.addEventListener("close", onCloseBeforeOpen, {once: true})
       this.socket.addEventListener("message", this.onMessage)
       this.socket.addEventListener("close", this.onClose)
     })
@@ -491,7 +546,7 @@ export default class SnapReqWebSocketClient {
    * Performs a POST request over the WebSocket.
    * @param {string} path - Path.
    * @param {any} [body] - Request body.
-   * @param {{headers?: Record<string, string>}} [options] - Request options such as headers.
+   * @param {{headers?: Record<string, string>, timeoutMs?: number, signal?: AbortSignal}} [options] - Request options such as headers and operation controls.
    * @returns {Promise<SnapReqWebSocketResponse>} - The response.
    */
   async post(path, body, options = {}) {
@@ -501,7 +556,7 @@ export default class SnapReqWebSocketClient {
   /**
    * Performs a GET request over the WebSocket.
    * @param {string} path - Path.
-   * @param {{headers?: Record<string, string>}} [options] - Request options such as headers.
+   * @param {{headers?: Record<string, string>, timeoutMs?: number, signal?: AbortSignal}} [options] - Request options such as headers and operation controls.
    * @returns {Promise<SnapReqWebSocketResponse>} - The response.
    */
   async get(path, options = {}) {
@@ -533,7 +588,7 @@ export default class SnapReqWebSocketClient {
   /**
    * Subscribes to a channel for server-sent events with optional params.
    * @param {string} channel - Channel name.
-   * @param {{lastEventId?: string, params?: Record<string, any>}} options - Subscription options.
+   * @param {{lastEventId?: string, params?: Record<string, any>, timeoutMs?: number, signal?: AbortSignal}} options - Subscription options.
    * @param {(payload: any, message?: Record<string, any>) => void} callback - Callback function.
    * @returns {(() => void) & {ready: Promise<void>}} - Unsubscribe function with readiness promise.
    */
@@ -564,6 +619,9 @@ export default class SnapReqWebSocketClient {
       })
 
       void this.connect().then(() => {
+        const currentListener = this.listeners.get(subscriptionKey)
+
+        if (currentListener?.ready !== ready || currentListener.callbacks.size === 0) return
         this._sendMessage({channel, lastEventId, params, type: "subscribe"})
       }).catch((error) => this._debug("Subscribe failed", error))
     }
@@ -579,10 +637,19 @@ export default class SnapReqWebSocketClient {
 
       if (listenerEntry.callbacks.size === 0) {
         this.listeners.delete(subscriptionKey)
+        this.pendingSubscriptions.delete(subscriptionKey)
       }
     }
 
-    unsubscribe.ready = listenerEntry.ready
+    unsubscribe.ready = runControlled(options || {}, () => listenerEntry.ready).catch((error) => {
+      listenerEntry.callbacks.delete(callback)
+      if (listenerEntry.callbacks.size === 0) {
+        this.listeners.delete(subscriptionKey)
+        this.pendingSubscriptions.delete(subscriptionKey)
+      }
+
+      throw error
+    })
 
     return unsubscribe
   }
@@ -590,7 +657,7 @@ export default class SnapReqWebSocketClient {
   /**
    * Subscribes to a channel and waits until the server acknowledges it.
    * @param {string} channel - Channel name.
-   * @param {{lastEventId?: string, params?: Record<string, any>}} options - Subscription options.
+   * @param {{lastEventId?: string, params?: Record<string, any>, timeoutMs?: number, signal?: AbortSignal}} options - Subscription options.
    * @param {(payload: any, message?: Record<string, any>) => void} callback - Callback function.
    * @returns {Promise<(() => void) & {ready: Promise<void>}>} - Ready unsubscribe handle.
    */
@@ -608,10 +675,12 @@ export default class SnapReqWebSocketClient {
    * @param {object} [options] - Options object.
    * @param {any} [options.body] - Request body.
    * @param {Record<string, string>} [options.headers] - Header list.
+   * @param {number} [options.timeoutMs] - Deadline for connect/session readiness and the response.
+   * @param {AbortSignal} [options.signal] - Cancels only this pending request.
    * @returns {Promise<SnapReqWebSocketResponse>} - The response.
    */
-  async request(method, path, {body, headers} = {}) {
-    await this.connect()
+  async request(method, path, {body, headers, timeoutMs, signal} = {}) {
+    await this.connect({timeoutMs, signal})
 
     const id = `ws-${this.nextID++}`
     const payload = {
@@ -623,10 +692,16 @@ export default class SnapReqWebSocketClient {
       type: "request"
     }
 
-    return await new Promise((resolve, reject) => {
+    return await runControlled({timeoutMs, signal}, () => new Promise((resolve, reject) => {
       this.pendingRequests.set(id, {resolve, reject})
-      this._sendMessage(payload)
-    })
+
+      try {
+        this._sendMessage(payload)
+      } catch (error) {
+        this.pendingRequests.delete(id)
+        reject(error)
+      }
+    })).finally(() => this.pendingRequests.delete(id))
   }
 
   /**
@@ -863,17 +938,28 @@ export default class SnapReqWebSocketClient {
     }
   }
 
-  onClose = () => {
+  /**
+   * Processes one socket's terminal lifecycle exactly once.
+   * @param {object} socket - Socket that closed or is being torn down.
+   * @param {unknown} [error] - Failure propagated to pending operations.
+   * @param {boolean} [allowReconnect] - Whether this close may schedule reconnect.
+   * @returns {void}
+   */
+  _handleSocketClose(socket, error, allowReconnect = this.autoReconnect) {
+    if (this._closedSockets.has(socket)) return
+    this._closedSockets.add(socket)
+
     this._stopSocketKeepalive()
     this.disconnectedSince ||= Date.now()
-    this._resetSessionReadyState()
+    this._resetSessionReadyState(error)
 
     for (const [id, {reject}] of this.pendingRequests.entries()) {
-      reject(new Error(`Websocket closed before response for ${id}`))
+      reject(error || new Error(`Websocket closed before response for ${id}`))
     }
 
-    for (const {reject} of this.pendingSubscriptions.values()) {
-      reject(new Error("Websocket closed before subscription acknowledgement"))
+    for (const [subscriptionKey, {reject}] of this.pendingSubscriptions.entries()) {
+      reject(error || new Error("Websocket closed before subscription acknowledgement"))
+      this.listeners.delete(subscriptionKey)
     }
 
     if (this._sessionId && this.autoReconnect) {
@@ -904,13 +990,19 @@ export default class SnapReqWebSocketClient {
     this.pendingSubscriptions.clear()
     this.connectPromise = undefined
 
-    if (!this.autoReconnect) return
+    if (!allowReconnect || !this.autoReconnect) return
 
     void this._shouldWaitForOnline().then((shouldWaitForOnline) => {
       if (!shouldWaitForOnline) {
         this._scheduleReconnect()
       }
     })
+  }
+
+  onClose = (event) => {
+    const socket = event.currentTarget || this.socket
+
+    if (socket) this._handleSocketClose(socket)
   }
 
   /**

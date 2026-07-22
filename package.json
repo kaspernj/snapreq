@@ -40,6 +40,9 @@
   ],
   "author": "kasper@diestoeckels.de",
   "license": "ISC",
+  "dependencies": {
+    "awaitery": "1.0.19"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.0.1",

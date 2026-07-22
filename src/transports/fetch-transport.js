@@ -70,13 +70,16 @@ export default class FetchTransport {
       throw error
     }
 
+    const responseStream = this._responseStream(fetchResponse)
+
     return new SnapReqResponse({
       url: request.url,
       method: request.method,
       status: fetchResponse.status,
       statusText: fetchResponse.statusText,
       headers: this._responseHeaders(fetchResponse),
-      stream: this._responseStream(fetchResponse)
+      stream: responseStream,
+      cancelBody: (error) => responseStream.cancel?.(error)
     })
   }
 
@@ -97,14 +100,16 @@ export default class FetchTransport {
    * `ReadableStream` body for true streaming when present and otherwise buffers
    * the whole body once so the stream interface stays identical everywhere.
    * @param {Response} response - The fetch response.
-   * @returns {AsyncIterable<Uint8Array>} - The response body stream.
+   * @returns {AsyncIterable<Uint8Array> & {cancel?: (reason?: unknown) => void}} - The response body stream.
    */
   _responseStream(response) {
     const body = response.body
 
     if (body && typeof body.getReader === "function") {
-      return (async function* () {
-        const reader = body.getReader()
+      /** @type {ReadableStreamDefaultReader<Uint8Array> | null} */
+      let reader = null
+      const iterable = (async function* () {
+        reader = body.getReader()
 
         try {
           while (true) {
@@ -114,9 +119,24 @@ export default class FetchTransport {
             if (value) yield value instanceof Uint8Array ? value : new Uint8Array(value)
           }
         } finally {
-          reader.releaseLock?.()
+          if (reader) {
+            try {
+              await reader.cancel()
+            } catch {
+              // The body may already be errored by an abort.
+            }
+            reader.releaseLock?.()
+          }
         }
       })()
+
+      const cancellable = /** @type {AsyncIterable<Uint8Array> & {cancel: (reason?: unknown) => void}} */ (/** @type {unknown} */ (iterable))
+
+      cancellable.cancel = (reason) => {
+        if (reader) void reader.cancel(reason)
+        else void body.cancel(reason)
+      }
+      return cancellable
     }
 
     return (async function* () {

@@ -20,6 +20,16 @@ function buildChannel() {
 }
 
 describe("SnapReqWebSocketChannel ready lifecycle", () => {
+  it("memoizes constructor-controlled ready access", async () => {
+    const {channel} = buildChannel()
+    const first = channel.ready
+    const second = channel.ready
+
+    assert.strictEqual(second, first)
+    channel._handleSubscribed()
+    await first
+  })
+
   it("resolves ready when the client unsubscribes before the server acknowledges", async () => {
     const {channel, sent} = buildChannel()
     const ready = channel.ready

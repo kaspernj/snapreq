@@ -2,9 +2,10 @@
 
 import {after, before, describe, it} from "node:test"
 import assert from "node:assert/strict"
-import {Readable} from "node:stream"
+import {spawn} from "node:child_process"
+import {PassThrough, Readable} from "node:stream"
 import SnapReq from "../src/snap-req.js"
-import {SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
+import {SnapReqAbortError, SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
 import SnapReqResponse from "../src/response.js"
 import {startTestServer} from "./support/test-server.js"
 
@@ -127,6 +128,10 @@ for (const transport of ["node", "fetch"]) {
       const client = newClient()
       const response = await client.get("/slow-body", {timeoutMs: 100})
 
+      if (transport === "node") {
+        assert.equal(response.nodeStream?.rawListeners("error").some((listener) => listener.name === "handleOwnedResponseError"), true)
+      }
+
       await assert.rejects(
         () => response.text(),
         (error) => {
@@ -135,6 +140,9 @@ for (const transport of ["node", "fetch"]) {
           return true
         }
       )
+      if (transport === "node") {
+        assert.equal(response.nodeStream?.rawListeners("error").some((listener) => listener.name === "handleOwnedResponseError"), false)
+      }
 
       client.close()
     })
@@ -210,7 +218,226 @@ for (const transport of ["node", "fetch"]) {
   })
 }
 
+describe("SnapReq cancellation", () => {
+  it("tears down an unconsumed Node response deadline without an uncaught stream error", async () => {
+    const child = spawn(process.execPath, [new URL("./support/unconsumed-response-child.js", import.meta.url).pathname], {
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+    let stdout = ""
+    let stderr = ""
+
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (chunk) => { stdout += chunk })
+    child.stderr.on("data", (chunk) => { stderr += chunk })
+
+    const result = await Promise.race([
+      new Promise((resolve) => child.once("exit", (code, signal) => resolve({code, signal}))),
+      new Promise((_, reject) => setTimeout(() => {
+        child.kill("SIGKILL")
+        reject(new Error("unconsumed response child did not exit"))
+      }, 2000))
+    ])
+
+    assert.deepEqual(result, {code: 0, signal: null}, stderr)
+    assert.deepEqual(JSON.parse(stdout), {
+      uncaught: [],
+      responseClosed: true,
+      socketClosed: true
+    })
+  })
+
+  for (const tries of [1, 3]) {
+    it(`keeps the final retryable response body readable after ${tries} ${tries === 1 ? "try" : "tries"}`, async () => {
+      let attempts = 0
+      const cancelledAttempts = []
+      const client = new SnapReq({
+        transport: {
+          capabilities: {},
+          performRequest: async (request) => {
+            attempts += 1
+            const attemptNumber = attempts
+
+            if (attemptNumber > 1) {
+              assert.deepEqual(cancelledAttempts, Array.from({length: attemptNumber - 1}, (_, index) => index + 1))
+            }
+
+            return new SnapReqResponse({
+              url: request.url,
+              method: request.method,
+              status: 503,
+              stream: Readable.from([new TextEncoder().encode(`retry body ${attemptNumber}`)]),
+              cancelBody: () => cancelledAttempts.push(attemptNumber)
+            })
+          }
+        }
+      })
+
+      const response = await client.get("http://example.test/exhausted", {
+        retry: {tries, waitMs: 1}
+      })
+
+      assert.equal(response.status, 503)
+      assert.equal(await response.text(), `retry body ${tries}`)
+      assert.equal(attempts, tries)
+      assert.deepEqual(cancelledAttempts, Array.from({length: tries - 1}, (_, index) => index + 1))
+      client.close()
+    })
+  }
+
+  it("clears intermediate retry body watchdogs while leaving the exhausted body readable", async () => {
+    const responses = []
+    let attempts = 0
+
+    const client = new SnapReq({
+      transport: {
+        capabilities: {},
+        performRequest: async (request) => {
+          attempts += 1
+          const response = new SnapReqResponse({
+            url: request.url,
+            method: request.method,
+            status: 503,
+            stream: Readable.from([new TextEncoder().encode(`retry body ${attempts}`)]),
+            cancelBody: () => {}
+          })
+          responses.push(response)
+          return response
+        }
+      }
+    })
+
+    try {
+      const response = await client.get("http://example.test/exhausted-with-timeout", {
+        timeoutMs: 1000,
+        retry: {tries: 3, waitMs: 1}
+      })
+
+      assert.equal(responses.length, 3)
+      assert.equal(responses[0]._bodyDone, true)
+      assert.equal(responses[1]._bodyDone, true)
+      assert.equal(responses[2]._bodyDone, false)
+      assert.equal(await response.text(), "retry body 3")
+      assert.equal(responses[2]._bodyDone, true)
+    } finally {
+      client.close()
+    }
+  })
+
+  it("passes 1-based try numbers to custom shouldRetry", async () => {
+    const tryNumbers = []
+    let attempts = 0
+    const client = new SnapReq({
+      transport: {
+        capabilities: {},
+        performRequest: async () => {
+          attempts += 1
+          throw Object.assign(new Error("socket reset"), {code: "ECONNRESET"})
+        }
+      }
+    })
+
+    await assert.rejects(() => client.get("http://example.test/retry-numbering", {
+      retry: {
+        tries: 3,
+        waitMs: 1,
+        shouldRetry: (_error, tryNumber) => {
+          tryNumbers.push(tryNumber)
+          return true
+        }
+      }
+    }), /socket reset/)
+
+    assert.equal(attempts, 3)
+    assert.deepEqual(tryNumbers, [1, 2])
+    client.close()
+  })
+
+  for (const transport of ["node", "fetch"]) {
+    it(`maps caller cancellation before headers over ${transport}`, async () => {
+      const controller = new AbortController()
+      const client = new SnapReq({baseUrl: server.baseUrl, transport: /** @type {any} */ (transport)})
+      const request = client.get("/slow-start", {signal: controller.signal})
+
+      controller.abort()
+      await assert.rejects(request, SnapReqAbortError)
+      client.close()
+    })
+
+    for (const timeoutMs of [undefined, 1000]) {
+      it(`cancels response buffering after headers over ${transport}${timeoutMs ? " with a deadline" : ""}`, async () => {
+        const controller = new AbortController()
+        const client = new SnapReq({baseUrl: server.baseUrl, transport: /** @type {any} */ (transport)})
+        const response = await client.get("/slow-body", {signal: controller.signal, timeoutMs})
+        const body = response.text()
+
+        controller.abort()
+        await assert.rejects(body, SnapReqAbortError)
+        client.close()
+      })
+    }
+
+    it(`keeps a completed body terminal when the caller later aborts over ${transport}`, async () => {
+      const controller = new AbortController()
+      const client = new SnapReq({baseUrl: server.baseUrl, transport: /** @type {any} */ (transport)})
+      const response = await client.get("/json", {signal: controller.signal, timeoutMs: 1000})
+      const body = await response.text()
+
+      controller.abort()
+      assert.equal(await response.text(), body)
+      client.close()
+    })
+  }
+
+  it("interrupts a retry wait without starting another attempt", async () => {
+    const controller = new AbortController()
+    let attempts = 0
+    const client = new SnapReq({
+      transport: {
+        capabilities: {},
+        performRequest: async () => {
+          attempts += 1
+
+          if (attempts > 1) throw new Error("request attempted after cancellation")
+
+          throw Object.assign(new Error("socket reset"), {code: "ECONNRESET"})
+        }
+      }
+    })
+
+    await assert.rejects(
+      () => client.get("http://example.test/retry", {
+        signal: controller.signal,
+        retry: {
+          tries: 3,
+          waitMs: 1,
+          shouldRetry: () => {
+            controller.abort()
+            return true
+          }
+        }
+      }),
+      SnapReqAbortError
+    )
+    assert.equal(attempts, 1)
+  })
+})
+
 describe("SnapReq node-only features", () => {
+  it("tears down a compressed upload without destroying the caller stream", async () => {
+    const source = new PassThrough()
+    const client = new SnapReq({baseUrl: server.baseUrl, transport: "node"})
+
+    source.write("partial")
+    await assert.rejects(
+      () => client.post("/echo", source, {bodyCompression: "gzip", timeoutMs: 20}),
+      SnapReqTimeoutError
+    )
+    assert.equal(source.destroyed, false)
+    source.destroy()
+    client.close()
+  })
+
   it("compresses the request body with gzip", async () => {
     const client = new SnapReq({baseUrl: server.baseUrl, transport: "node"})
     const response = await client.post("/echo", "uncompressed-payload", {bodyCompression: "gzip"})
