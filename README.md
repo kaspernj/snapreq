@@ -167,6 +167,57 @@ connection.sendMessage({text: "hi"})
 
 Optional adapters: `networkMonitor` (gate reconnects on online state), `sessionStore` (persist the session id across reloads) and `deserialize` (a `(value) => value` transform applied inside `response.json()` so an app can re-hydrate its own wire format).
 
+## Hermes Compose development
+
+The repository includes a task-isolated Node 24 development environment for
+Hermes/Threadwire work. It mounts one exact worktree into `/workspace`; the
+dependency, npm-cache, and Codex state volumes are scoped by the required
+Compose project name. There are no support services, host ports, or fixed
+container names.
+
+From the outer Hermes Docker host, allocate a self-contained Git checkout
+(with its own `.git` directory) directly below
+`/opt/hermes-dind-shared/worktrees/snapreq` and keep its task name identical to
+the Compose suffix:
+
+```sh
+export SNAPREQ_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/10575
+export SNAPREQ_COMPOSE_PROJECT=snapreq-10575
+
+scripts/hermes-compose.js validate
+scripts/hermes-compose.js config
+scripts/hermes-compose.js build --pull
+scripts/hermes-compose.js up
+scripts/hermes-compose.js exec npm ci
+scripts/hermes-compose.js proof
+scripts/hermes-compose.js down
+```
+
+Codex authentication is initialized into the task-owned volume from one
+explicit, existing Docker volume in the private DinD daemon. That source
+volume must contain `/auth.json`; it is mounted read-only only for the one-off
+initializer and never attached to the long-running service:
+
+```sh
+export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
+scripts/hermes-compose.js init-codex
+```
+
+Threadwire remains on the outer host. The lifecycle wrapper launches it with
+the checked-in provider adapter, which runs Codex in the `dev` service at
+`/workspace`:
+
+```sh
+export THREADWIRE_TARGET=telegram:-1001234567890:42
+scripts/hermes-compose.js threadwire --prompt 'Inspect the project.'
+```
+
+Use `scripts/hermes-compose.js down` for ordinary teardown; it preserves task
+state. Volume/image deletion requires the separate, exact confirmation
+`SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose.js purge`.
+See [AGENTS.md](AGENTS.md) for the authoritative boundary, parallel-allocation,
+verification, smoke-test, and non-Hermes workflow rules.
+
 ## License
 
 ISC

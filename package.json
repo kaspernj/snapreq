@@ -21,13 +21,14 @@
   "scripts": {
     "all-checks": "npm run typecheck && npm run lint && npm run test",
     "build": "rm -rf build && tsc",
+    "hermes:check": "node --test spec/hermes-compose-spec.js",
     "lint": "npm run eslint && npm run typecheck",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "release:patch": "release-patch",
     "test": "npm run build && node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit",
-    "eslint": "eslint src spec"
+    "eslint": "eslint src spec scripts"
   },
   "keywords": [
     "http",

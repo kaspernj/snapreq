@@ -1,0 +1,65 @@
+name: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+
+services:
+  dev:
+    image: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}-dev
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes
+      args:
+        CODEX_VERSION: "0.144.5"
+        HERMES_PROJECT: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      CODEX_HOME: /home/node/.codex
+      HERMES_COMPOSE_PROJECT: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      HOME: /home/node
+      NPM_CONFIG_CACHE: /home/node/.npm
+      NODE_ENV: development
+    labels:
+      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      io.snapreq.hermes.service: dev
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: ${SNAPREQ_SOURCE_PATH:?Set SNAPREQ_SOURCE_PATH to the exact task checkout}
+        target: /workspace
+        bind:
+          create_host_path: false
+      - type: volume
+        source: node_modules
+        target: /workspace/node_modules
+      - type: volume
+        source: npm_cache
+        target: /home/node/.npm
+      - type: volume
+        source: codex_home
+        target: /home/node/.codex
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "node", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  node_modules:
+    labels:
+      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      io.snapreq.hermes.purpose: node_modules
+  npm_cache:
+    labels:
+      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      io.snapreq.hermes.purpose: npm_cache
+  codex_home:
+    labels:
+      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      io.snapreq.hermes.purpose: codex_home
+
+networks:
+  default:
+    labels:
+      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}

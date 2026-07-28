@@ -1,0 +1,38 @@
+FROM node:24.18.0-bookworm
+
+ARG CODEX_VERSION=0.144.5
+ARG HERMES_PROJECT
+
+LABEL io.snapreq.hermes.image="dev" \
+  io.snapreq.hermes.project="${HERMES_PROJECT}"
+
+RUN test -n "$HERMES_PROJECT"
+
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    gh \
+    git \
+    git-lfs \
+    jq \
+    openssh-client \
+    pkg-config \
+    python3 \
+    tini \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
+  && npm cache clean --force
+
+RUN install -d -o 1000 -g 1000 -m 0755 \
+  /workspace \
+  /workspace/node_modules \
+  /home/node/.npm \
+  /home/node/.codex
+
+USER node
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]
