@@ -1,30 +1,36 @@
-name: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+name: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT to the configured prefix and task}
 
 services:
   dev:
-    image: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}-dev
+    image: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}-dev
     build:
       context: .
       dockerfile: Dockerfile.hermes
       args:
-        CODEX_VERSION: "0.144.5"
-        HERMES_PROJECT: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+        OPENCODE_VERSION: "1.18.8"
+        CODEX_VERSION: "0.145.0"
+        CLAUDE_CODE_VERSION: "2.1.220"
+        KIMI_CODE_VERSION: "0.29.2"
+        THREADWIRE_VERSION: "0.1.9"
+        PACKAGE_VERSION: "0.0.0"
+        PROJECT_NAME: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
     user: "1000:1000"
     working_dir: /workspace
     environment:
       CODEX_HOME: /home/node/.codex
-      HERMES_COMPOSE_PROJECT: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      HERMES_COMPOSE_PROJECT: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      HERMES_SOURCE_PATH: /workspace
       HOME: /home/node
       NPM_CONFIG_CACHE: /home/node/.npm
       NODE_ENV: development
     labels:
-      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
-      io.snapreq.hermes.service: dev
+      io.kaspernj.hermes-compose.project: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      io.kaspernj.hermes-compose.service: dev
     security_opt:
       - no-new-privileges:true
     volumes:
       - type: bind
-        source: ${SNAPREQ_SOURCE_PATH:?Set SNAPREQ_SOURCE_PATH to the exact task checkout}
+        source: ${HERMES_SOURCE_PATH:?Set HERMES_SOURCE_PATH to the exact task checkout}
         target: /workspace
         bind:
           create_host_path: false
@@ -48,18 +54,19 @@ services:
 volumes:
   node_modules:
     labels:
-      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
-      io.snapreq.hermes.purpose: node_modules
+      io.kaspernj.hermes-compose.project: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      io.kaspernj.hermes-compose.purpose: node_modules
   npm_cache:
     labels:
-      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
-      io.snapreq.hermes.purpose: npm_cache
+      io.kaspernj.hermes-compose.project: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      io.kaspernj.hermes-compose.purpose: npm_cache
   codex_home:
     labels:
-      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
-      io.snapreq.hermes.purpose: codex_home
+      io.kaspernj.hermes-compose.project: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      io.kaspernj.hermes-compose.purpose: codex_home
 
 networks:
   default:
     labels:
-      io.snapreq.hermes.project: ${SNAPREQ_COMPOSE_PROJECT:?Set SNAPREQ_COMPOSE_PROJECT to snapreq-<task>}
+      io.kaspernj.hermes-compose.project: ${HERMES_COMPOSE_PROJECT:?Set HERMES_COMPOSE_PROJECT}
+      io.kaspernj.hermes-compose.network: default

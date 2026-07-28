@@ -22,10 +22,10 @@ Hermes work runs from an exact task worktree:
 Each task path must be a self-contained checkout with its `.git` directory
 inside the exact subtree. A linked Git worktree whose `.git` file points to a
 common directory outside the task path is intentionally rejected because that
-common directory is not mounted. Set `SNAPREQ_SOURCE_PATH` to the canonical
+common directory is not mounted. Set `HERMES_SOURCE_PATH` to the canonical
 task directory and
-`SNAPREQ_COMPOSE_PROJECT` to exactly `snapreq-<task>`. The task component is
-lowercase alphanumeric with optional internal hyphens. The wrapper rejects
+`HERMES_COMPOSE_PROJECT` to exactly `snapreq-<task>`. The task component is
+lowercase alphanumeric with optional internal hyphens. The package rejects
 symlinks, nested paths, a mismatched repository root/origin, ownership other
 than uid/gid 1000 for either the source root or its `.git` directory,
 world-writable source metadata, project/name mismatches, and ambiguous cleanup.
@@ -43,34 +43,40 @@ Never reuse a worktree or project name between live tasks.
 Run these commands on the outer Hermes Docker host from the task worktree:
 
 ```sh
-export SNAPREQ_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/<task>
-export SNAPREQ_COMPOSE_PROJECT=snapreq-<task>
+export HERMES_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/<task>
+export HERMES_COMPOSE_PROJECT=snapreq-<task>
 
-scripts/hermes-compose.js validate
-scripts/hermes-compose.js config
-scripts/hermes-compose.js build --pull
-scripts/hermes-compose.js up
-scripts/hermes-compose.js exec npm ci
-scripts/hermes-compose.js proof
-scripts/hermes-compose.js exec npm run all-checks
-scripts/hermes-compose.js down
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose validate
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose config
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose build --pull
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose up
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose exec npm ci
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose proof
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose exec npm run all-checks
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose down
 ```
 
-The wrapper always uses `docker compose -p "$SNAPREQ_COMPOSE_PROJECT"` and the
-checked-in `compose.hermes.yml`. `proof` reports and verifies `/workspace`, the
-Git root, origin, HEAD, source ownership/mode, Node/Codex versions, and the
-Compose-file SHA-256. Record the host HEAD and checksum as well:
+The development-only `@kaspernj/hermes-compose` package owns the lifecycle,
+provider, process and signal handling, bootstrap, proof, smoke acceptance, and
+exact cleanup. SnapReq owns its declarative `hermes.config.js` and checked-in
+Compose/Dockerfile wiring. The package always uses
+`docker compose -p "$HERMES_COMPOSE_PROJECT"` and the checked-in
+`compose.hermes.yml`. On the outer host, Node 24's npm runs the exact published
+package while SnapReq's project dependencies remain in the named container
+volume. `proof` reports and verifies `/workspace`, the Git root, origin, HEAD,
+source ownership/mode, pinned toolchain versions, and configured checksums.
+Record the host HEAD and Compose checksum as well:
 
 ```sh
-git -C "$SNAPREQ_SOURCE_PATH" rev-parse HEAD
-sha256sum "$SNAPREQ_SOURCE_PATH/compose.hermes.yml"
+git -C "$HERMES_SOURCE_PATH" rev-parse HEAD
+sha256sum "$HERMES_SOURCE_PATH/compose.hermes.yml"
 ```
 
 `down` removes only that project's containers and network and preserves
 mutable volumes. Destructive task-state cleanup is deliberately separate:
 
 ```sh
-SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose.js purge
+HERMES_PURGE_PROJECT="$HERMES_COMPOSE_PROJECT" npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose purge
 ```
 
 `purge` fails if the confirmation differs, any container still references an
@@ -84,8 +90,8 @@ Initialize each task's Codex volume from one explicit, existing Docker volume
 in the private DinD daemon:
 
 ```sh
-export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
-scripts/hermes-compose.js init-codex
+export HERMES_CODEX_AUTH_VOLUME=<existing-auth-volume>
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose init-codex
 ```
 
 The volume name is explicit and strictly validated; the volume must already
@@ -97,19 +103,19 @@ long-running service, and its contents must never enter source, an image,
 command output, or logs.
 
 Threadwire is the host-side control and relay process. It must not run Codex on
-the host. Launch it through the checked-in adapter:
+the host. Launch it through the package-owned provider:
 
 ```sh
 export THREADWIRE_TARGET=telegram:<chat-id>[:<thread-id>]
-scripts/hermes-compose.js threadwire --prompt 'Work on the task.'
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose threadwire --prompt 'Work on the task.'
 ```
 
-The wrapper sets `THREADWIRE_CODEX_BIN` to
-`scripts/threadwire-compose-provider.js`. Threadwire invokes that direct provider
-with `THREADWIRE_ACTIVE=1`; the adapter executes Codex only in the named
-Compose `dev` service, with working directory `/workspace`, and places
+The package sets `THREADWIRE_CODEX_BIN` to its installed provider. Threadwire
+invokes that direct provider with `THREADWIRE_ACTIVE=1`; the provider executes
+Codex only in the named Compose `dev` service, with working directory
+`/workspace`, and places
 `--dangerously-bypass-approvals-and-sandbox` before Threadwire's generated
-`exec` or `resume` arguments. The adapter rejects direct calls and flags that
+`exec` or `resume` arguments. The provider rejects direct calls and flags that
 could change the working directory, sandbox, or writable roots.
 
 No host or Hermes gateway may execute task commands. Do not use `/opt/data` as
@@ -130,16 +136,15 @@ npm run build
 npm run all-checks
 ```
 
-Also run `scripts/hermes-compose.js config`, a clean image build/start,
-`scripts/hermes-compose.js proof`, `npm run hermes:check`, and the outer
-two-stack acceptance:
+Also run the pinned `npm exec` `config` and `proof` commands above, a clean
+image build/start, `npm run hermes:check`, and the outer two-stack acceptance:
 
 ```sh
-export SNAPREQ_SMOKE_TASK_A=<unique-a>
-export SNAPREQ_SMOKE_TASK_B=<unique-b>
-export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
+export HERMES_SMOKE_TASK_A=<unique-a>
+export HERMES_SMOKE_TASK_B=<unique-b>
+export HERMES_CODEX_AUTH_VOLUME=<existing-auth-volume>
 export THREADWIRE_TARGET=telegram:<chat-id>[:<thread-id>]
-scripts/hermes-smoke.js
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose smoke
 ```
 
 The outer smoke process creates only two exact empty task destination
