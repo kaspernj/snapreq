@@ -38,6 +38,51 @@ bootstrap_image="${source_project}-dev"
   && "$(docker image inspect --format '{{index .Config.Labels "io.snapreq.hermes.project"}}' "$bootstrap_image" 2>/dev/null)" == "$source_project" ]] \
   || fail "build the validated source task image before running the smoke"
 
+assert_project_resources_absent() {
+  local project_name=$1
+  local container_ids volume_names project_volume_ids network_names project_network_ids
+  local image_repositories project_image_ids resource_name existing_name
+
+  container_ids="$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$project_name")" \
+    || fail "unable to query containers for $project_name"
+  [[ -z "$container_ids" ]] || fail "containers already exist for $project_name"
+
+  volume_names="$(docker volume ls --format '{{.Name}}')" \
+    || fail "unable to query volume names for $project_name"
+  for resource_name in \
+    "${project_name}_node_modules" \
+    "${project_name}_npm_cache" \
+    "${project_name}_codex_home"; do
+    while IFS= read -r existing_name; do
+      [[ "$existing_name" != "$resource_name" ]] \
+        || fail "volume already exists for $project_name: $resource_name"
+    done <<< "$volume_names"
+  done
+  project_volume_ids="$(docker volume ls --quiet --filter "label=io.snapreq.hermes.project=$project_name")" \
+    || fail "unable to query labeled volumes for $project_name"
+  [[ -z "$project_volume_ids" ]] || fail "project-labeled volumes already exist for $project_name"
+
+  network_names="$(docker network ls --format '{{.Name}}')" \
+    || fail "unable to query network names for $project_name"
+  while IFS= read -r existing_name; do
+    [[ "$existing_name" != "${project_name}_default" ]] \
+      || fail "default network already exists for $project_name"
+  done <<< "$network_names"
+  project_network_ids="$(docker network ls --quiet --filter "label=io.snapreq.hermes.project=$project_name")" \
+    || fail "unable to query labeled networks for $project_name"
+  [[ -z "$project_network_ids" ]] || fail "project-labeled networks already exist for $project_name"
+
+  image_repositories="$(docker image ls --format '{{.Repository}}')" \
+    || fail "unable to query image names for $project_name"
+  while IFS= read -r existing_name; do
+    [[ "$existing_name" != "${project_name}-dev" ]] \
+      || fail "development image already exists for $project_name"
+  done <<< "$image_repositories"
+  project_image_ids="$(docker image ls --quiet --filter "label=io.snapreq.hermes.project=$project_name")" \
+    || fail "unable to query labeled images for $project_name"
+  [[ -z "$project_image_ids" ]] || fail "project-labeled images already exist for $project_name"
+}
+
 task_a="${SNAPREQ_SMOKE_TASK_A:-}"
 task_b="${SNAPREQ_SMOKE_TASK_B:-}"
 [[ -n "$task_a" && -n "$task_b" ]] || fail "SNAPREQ_SMOKE_TASK_A and SNAPREQ_SMOKE_TASK_B are required"
@@ -54,6 +99,8 @@ branch_b="hermes-smoke/$task_b"
 
 [[ ! -e "$path_a" && ! -L "$path_a" ]] || fail "smoke path already exists: $path_a"
 [[ ! -e "$path_b" && ! -L "$path_b" ]] || fail "smoke path already exists: $path_b"
+assert_project_resources_absent "$project_a"
+assert_project_resources_absent "$project_b"
 
 created_a=0
 created_b=0
@@ -84,15 +131,19 @@ purge_stack() {
 
 assert_no_container_path_references() {
   local source_path=$1
-  local container_id mount_source
+  local container_ids container_id mount_sources mount_source
 
+  container_ids="$(docker container ls --all --quiet)" \
+    || fail "unable to list containers before removing $source_path"
   while IFS= read -r container_id; do
     [[ -n "$container_id" ]] || continue
+    mount_sources="$(docker container inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id")" \
+      || fail "unable to inspect container $container_id before removing $source_path"
     while IFS= read -r mount_source; do
       [[ "$mount_source" != "$source_path" ]] \
         || fail "container $container_id still references $source_path"
-    done < <(docker container inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id")
-  done < <(docker container ls --all --quiet)
+    done <<< "$mount_sources"
+  done <<< "$container_ids"
 }
 
 remove_checkout() {

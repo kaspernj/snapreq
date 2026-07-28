@@ -296,6 +296,189 @@ describe("Hermes reviewed boundary repairs", () => {
     assert.doesNotMatch(emptySource, /docker run|\brm -rf\b/)
   })
 
+  it("fails closed on container list and inspect errors before checkout deletion", () => {
+    const smokeSource = readFileSync(smoke, "utf8")
+    const functionStart = smokeSource.indexOf("assert_no_container_path_references() {")
+    const functionEnd = smokeSource.indexOf("\n}\n\nremove_checkout() {", functionStart)
+    const fixture = path.join(temporaryRoot, "container-reference-failures")
+    const fakeBin = path.join(fixture, "bin")
+    const fakeDocker = path.join(fakeBin, "docker")
+    const harness = path.join(fixture, "harness.sh")
+
+    assert.notEqual(functionStart, -1, "missing container-reference guard")
+    assert.notEqual(functionEnd, -1, "container-reference guard is not independently scoped")
+    const functionSource = smokeSource.slice(functionStart, functionEnd + 2)
+
+    mkdirSync(fakeBin, {recursive: true})
+    writeFileSync(fakeDocker, [
+      "#!/bin/sh",
+      "if [ \"${1:-}\" = container ] && [ \"${2:-}\" = ls ]; then",
+      "  case \"$DOCKER_STUB_SCENARIO\" in",
+      "    list-failure) exit 70 ;;",
+      "    inspect-failure|empty-mounts) printf 'container-1\\n' ;;",
+      "    empty-list) exit 0 ;;",
+      "  esac",
+      "  exit 0",
+      "fi",
+      "if [ \"${1:-}\" = container ] && [ \"${2:-}\" = inspect ]; then",
+      "  case \"$DOCKER_STUB_SCENARIO\" in",
+      "    inspect-failure) exit 71 ;;",
+      "    empty-mounts) exit 0 ;;",
+      "  esac",
+      "fi",
+      "exit 64",
+      ""
+    ].join("\n"), {mode: 0o755})
+    writeFileSync(harness, [
+      "#!/usr/bin/env bash",
+      "set -Eeuo pipefail",
+      "fail() { printf 'harness: %s\\n' \"$*\" >&2; exit 2; }",
+      functionSource,
+      "assert_no_container_path_references \"$TEST_SOURCE_PATH\"",
+      ": > \"$TEST_DELETION_MARKER\"",
+      ""
+    ].join("\n"), {mode: 0o755})
+
+    for (const scenario of ["list-failure", "inspect-failure"]) {
+      const marker = path.join(fixture, `${scenario}.deleted`)
+      const result = run(harness, [], {
+        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
+        DOCKER_STUB_SCENARIO: scenario,
+        TEST_DELETION_MARKER: marker,
+        TEST_SOURCE_PATH: "/exact/task-checkout"
+      })
+      assert.equal(result.status, 2, `${scenario} unexpectedly allowed cleanup`)
+      assert.equal(existsSync(marker), false, `${scenario} reached the deletion helper`)
+    }
+
+    for (const scenario of ["empty-list", "empty-mounts"]) {
+      const marker = path.join(fixture, `${scenario}.deleted`)
+      const result = run(harness, [], {
+        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
+        DOCKER_STUB_SCENARIO: scenario,
+        TEST_DELETION_MARKER: marker,
+        TEST_SOURCE_PATH: "/exact/task-checkout"
+      })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(existsSync(marker), true, `${scenario} did not complete the guard`)
+    }
+
+    assert.doesNotMatch(functionSource, /< <\(/)
+    assert.match(functionSource, /container_ids="\$\(docker container ls --all --quiet\)"/)
+    assert.match(functionSource, /mount_sources="\$\(docker container inspect --format/)
+  })
+
+  it("rejects existing or unqueryable task resources before either destination allocation", () => {
+    const smokeSource = readFileSync(smoke, "utf8")
+    const functionStart = smokeSource.indexOf("assert_project_resources_absent() {")
+    const functionEnd = smokeSource.indexOf("\n}\n\ntask_a=", functionStart)
+    const fixture = path.join(temporaryRoot, "resource-preflight")
+    const fakeBin = path.join(fixture, "bin")
+    const fakeDocker = path.join(fakeBin, "docker")
+    const harness = path.join(fixture, "harness.sh")
+
+    assert.notEqual(functionStart, -1, "missing task-resource preflight")
+    assert.notEqual(functionEnd, -1, "task-resource preflight is not independently scoped")
+    const functionSource = smokeSource.slice(functionStart, functionEnd + 2)
+
+    mkdirSync(fakeBin, {recursive: true})
+    writeFileSync(fakeDocker, [
+      "#!/bin/sh",
+      "case \"${1:-}:${3:-}\" in",
+      "  container:--all)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-container ] && exit 70",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = container ] && printf 'container-1\\n'",
+      "    ;;",
+      "  volume:--format)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-volume-names ] && exit 71",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = volume-exact ] && printf '%s_node_modules\\n' \"$TEST_PROJECT\"",
+      "    ;;",
+      "  volume:--quiet)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-volume-labels ] && exit 72",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = volume-labeled ] && printf 'volume-1\\n'",
+      "    ;;",
+      "  network:--format)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-network-names ] && exit 73",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = network-exact ] && printf '%s_default\\n' \"$TEST_PROJECT\"",
+      "    ;;",
+      "  network:--quiet)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-network-labels ] && exit 74",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = network-labeled ] && printf 'network-1\\n'",
+      "    ;;",
+      "  image:--format)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-image-names ] && exit 75",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = image-exact ] && printf '%s-dev\\n' \"$TEST_PROJECT\"",
+      "    ;;",
+      "  image:--quiet)",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-image-labels ] && exit 76",
+      "    [ \"$DOCKER_STUB_SCENARIO\" = image-labeled ] && printf 'image-1\\n'",
+      "    ;;",
+      "  *) exit 64 ;;",
+      "esac",
+      "exit 0",
+      ""
+    ].join("\n"), {mode: 0o755})
+    writeFileSync(harness, [
+      "#!/usr/bin/env bash",
+      "set -Eeuo pipefail",
+      "fail() { printf 'harness: %s\\n' \"$*\" >&2; exit 2; }",
+      functionSource,
+      "assert_project_resources_absent \"$TEST_PROJECT\"",
+      ": > \"$TEST_ALLOCATION_MARKER\"",
+      ""
+    ].join("\n"), {mode: 0o755})
+
+    const rejectedScenarios = [
+      "container",
+      "volume-exact",
+      "volume-labeled",
+      "network-exact",
+      "network-labeled",
+      "image-exact",
+      "image-labeled",
+      "fail-container",
+      "fail-volume-names",
+      "fail-volume-labels",
+      "fail-network-names",
+      "fail-network-labels",
+      "fail-image-names",
+      "fail-image-labels"
+    ]
+    for (const scenario of rejectedScenarios) {
+      const marker = path.join(fixture, `${scenario}.allocated`)
+      const result = run(harness, [], {
+        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
+        DOCKER_STUB_SCENARIO: scenario,
+        TEST_ALLOCATION_MARKER: marker,
+        TEST_PROJECT: "snapreq-review-test"
+      })
+      assert.equal(result.status, 2, `${scenario} unexpectedly allowed allocation`)
+      assert.equal(existsSync(marker), false, `${scenario} reached destination allocation`)
+    }
+
+    const cleanMarker = path.join(fixture, "clean.allocated")
+    const clean = run(harness, [], {
+      PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
+      DOCKER_STUB_SCENARIO: "clean",
+      TEST_ALLOCATION_MARKER: cleanMarker,
+      TEST_PROJECT: "snapreq-review-test"
+    })
+    assert.equal(clean.status, 0, clean.stderr)
+    assert.equal(existsSync(cleanMarker), true)
+
+    assert.match(functionSource, /\$\{project_name\}_node_modules/)
+    assert.match(functionSource, /\$\{project_name\}_npm_cache/)
+    assert.match(functionSource, /\$\{project_name\}_codex_home/)
+    assert.match(functionSource, /\$\{project_name\}_default/)
+    assert.match(functionSource, /\$\{project_name\}-dev/)
+
+    const preflightA = smokeSource.indexOf('assert_project_resources_absent "$project_a"')
+    const preflightB = smokeSource.indexOf('assert_project_resources_absent "$project_b"')
+    const allocationA = smokeSource.indexOf('create_empty_destination "$path_a" created_a')
+    assert.ok(preflightA >= 0 && preflightB > preflightA)
+    assert.ok(allocationA > preflightB, "both resource preflights must precede destination allocation")
+  })
+
   it("allows a non-1000 outer orchestrator while enforcing checkout and service ownership", () => {
     const fakeBin = path.join(temporaryRoot, "uid-10000-bin")
     const fakeId = path.join(fakeBin, "id")
