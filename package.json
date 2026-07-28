@@ -28,7 +28,7 @@
     "release:patch": "release-patch",
     "test": "npm run build && node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit",
-    "eslint": "eslint src spec"
+    "eslint": "eslint src spec scripts"
   },
   "keywords": [
     "http",

@@ -46,14 +46,14 @@ Run these commands on the outer Hermes Docker host from the task worktree:
 export SNAPREQ_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/<task>
 export SNAPREQ_COMPOSE_PROJECT=snapreq-<task>
 
-scripts/hermes-compose validate
-scripts/hermes-compose config
-scripts/hermes-compose build --pull
-scripts/hermes-compose up
-scripts/hermes-compose exec npm ci
-scripts/hermes-compose proof
-scripts/hermes-compose exec npm run all-checks
-scripts/hermes-compose down
+scripts/hermes-compose.js validate
+scripts/hermes-compose.js config
+scripts/hermes-compose.js build --pull
+scripts/hermes-compose.js up
+scripts/hermes-compose.js exec npm ci
+scripts/hermes-compose.js proof
+scripts/hermes-compose.js exec npm run all-checks
+scripts/hermes-compose.js down
 ```
 
 The wrapper always uses `docker compose -p "$SNAPREQ_COMPOSE_PROJECT"` and the
@@ -70,7 +70,7 @@ sha256sum "$SNAPREQ_SOURCE_PATH/compose.hermes.yml"
 mutable volumes. Destructive task-state cleanup is deliberately separate:
 
 ```sh
-SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose purge
+SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose.js purge
 ```
 
 `purge` fails if the confirmation differs, any container still references an
@@ -85,7 +85,7 @@ in the private DinD daemon:
 
 ```sh
 export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
-scripts/hermes-compose init-codex
+scripts/hermes-compose.js init-codex
 ```
 
 The volume name is explicit and strictly validated; the volume must already
@@ -101,11 +101,11 @@ the host. Launch it through the checked-in adapter:
 
 ```sh
 export THREADWIRE_TARGET=telegram:<chat-id>[:<thread-id>]
-scripts/hermes-compose threadwire --prompt 'Work on the task.'
+scripts/hermes-compose.js threadwire --prompt 'Work on the task.'
 ```
 
 The wrapper sets `THREADWIRE_CODEX_BIN` to
-`scripts/threadwire-compose-provider`. Threadwire invokes that direct provider
+`scripts/threadwire-compose-provider.js`. Threadwire invokes that direct provider
 with `THREADWIRE_ACTIVE=1`; the adapter executes Codex only in the named
 Compose `dev` service, with working directory `/workspace`, and places
 `--dangerously-bypass-approvals-and-sandbox` before Threadwire's generated
@@ -130,8 +130,8 @@ npm run build
 npm run all-checks
 ```
 
-Also run `scripts/hermes-compose config`, a clean image build/start,
-`scripts/hermes-compose proof`, `npm run hermes:check`, and the outer
+Also run `scripts/hermes-compose.js config`, a clean image build/start,
+`scripts/hermes-compose.js proof`, `npm run hermes:check`, and the outer
 two-stack acceptance:
 
 ```sh
@@ -139,15 +139,16 @@ export SNAPREQ_SMOKE_TASK_A=<unique-a>
 export SNAPREQ_SMOKE_TASK_B=<unique-b>
 export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
 export THREADWIRE_TARGET=telegram:<chat-id>[:<thread-id>]
-scripts/hermes-smoke
+scripts/hermes-smoke.js
 ```
 
 The outer smoke process creates only two exact empty task destination
 directories and never changes their ownership itself. A networkless root
-helper mounts only one exact empty destination at a time, gives it ownership
-1000:1000 and mode 0755, and exits. A separate networkless bootstrap container
-then runs as 1000:1000, mounting only the exact source task subtree read-only
-and that one exact destination task subtree writable to perform
+helper mounts only the exact main task source read-only and one exact empty
+destination at a time, gives the destination ownership 1000:1000 and mode
+0755, and exits. A separate networkless bootstrap container then runs as
+1000:1000, mounting only the exact source task subtree read-only and that one
+exact destination task subtree writable to perform
 clone/branch/marker/commit operations inside the container. The smoke script
 then creates two self-contained task-owned checkouts/branches/commits/stacks,
 proves their distinct Git/checksum/volume/network identities, performs real

@@ -184,13 +184,13 @@ the Compose suffix:
 export SNAPREQ_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/10575
 export SNAPREQ_COMPOSE_PROJECT=snapreq-10575
 
-scripts/hermes-compose validate
-scripts/hermes-compose config
-scripts/hermes-compose build --pull
-scripts/hermes-compose up
-scripts/hermes-compose exec npm ci
-scripts/hermes-compose proof
-scripts/hermes-compose down
+scripts/hermes-compose.js validate
+scripts/hermes-compose.js config
+scripts/hermes-compose.js build --pull
+scripts/hermes-compose.js up
+scripts/hermes-compose.js exec npm ci
+scripts/hermes-compose.js proof
+scripts/hermes-compose.js down
 ```
 
 Codex authentication is initialized into the task-owned volume from one
@@ -200,7 +200,7 @@ initializer and never attached to the long-running service:
 
 ```sh
 export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
-scripts/hermes-compose init-codex
+scripts/hermes-compose.js init-codex
 ```
 
 Threadwire remains on the outer host. The lifecycle wrapper launches it with
@@ -209,12 +209,12 @@ the checked-in provider adapter, which runs Codex in the `dev` service at
 
 ```sh
 export THREADWIRE_TARGET=telegram:-1001234567890:42
-scripts/hermes-compose threadwire --prompt 'Inspect the project.'
+scripts/hermes-compose.js threadwire --prompt 'Inspect the project.'
 ```
 
-Use `scripts/hermes-compose down` for ordinary teardown; it preserves task
+Use `scripts/hermes-compose.js down` for ordinary teardown; it preserves task
 state. Volume/image deletion requires the separate, exact confirmation
-`SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose purge`.
+`SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose.js purge`.
 See [AGENTS.md](AGENTS.md) for the authoritative boundary, parallel-allocation,
 verification, smoke-test, and non-Hermes workflow rules.
 

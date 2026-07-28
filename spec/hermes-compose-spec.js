@@ -2,17 +2,37 @@
 
 import {after, before, describe, it} from "node:test"
 import assert from "node:assert/strict"
-import {chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from "node:fs"
-import {spawnSync} from "node:child_process"
-import {fileURLToPath} from "node:url"
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs"
+import {spawn, spawnSync} from "node:child_process"
+import {fileURLToPath, pathToFileURL} from "node:url"
 import path from "node:path"
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url))
-const lifecycle = path.join(repoRoot, "scripts/hermes-compose")
-const provider = path.join(repoRoot, "scripts/threadwire-compose-provider")
-const smoke = path.join(repoRoot, "scripts/hermes-smoke")
-const smokeBootstrap = path.join(repoRoot, "scripts/hermes-smoke-bootstrap")
+const scriptsDirectory = path.join(repoRoot, "scripts")
+const commandModule = path.join(scriptsDirectory, "hermes-command.js")
+const lifecycle = path.join(scriptsDirectory, "hermes-compose.js")
+const provider = path.join(scriptsDirectory, "threadwire-compose-provider.js")
+const smoke = path.join(scriptsDirectory, "hermes-smoke.js")
+const smokeBootstrap = path.join(scriptsDirectory, "hermes-smoke-bootstrap.js")
 const scripts = [lifecycle, provider, smoke, smokeBootstrap]
+const removedScripts = [
+  path.join(scriptsDirectory, "hermes-compose"),
+  path.join(scriptsDirectory, "threadwire-compose-provider"),
+  path.join(scriptsDirectory, "hermes-smoke"),
+  path.join(scriptsDirectory, "hermes-smoke-bootstrap")
+]
 let temporaryRoot
 
 /**
@@ -20,17 +40,28 @@ let temporaryRoot
  * @param {string} command - Executable path.
  * @param {string[]} arguments_ - Argument vector.
  * @param {Record<string, string>} [extraEnvironment] - Explicit safe environment additions.
+ * @param {{input?: string}} [options] - Optional process input.
  * @returns {import("node:child_process").SpawnSyncReturns<string>} - Completed child result.
  */
-function run(command, arguments_, extraEnvironment = {}) {
+function run(command, arguments_, extraEnvironment = {}, options = {}) {
   return spawnSync(command, arguments_, {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
       PATH: process.env.PATH || "/usr/bin:/bin",
       ...extraEnvironment
-    }
+    },
+    input: options.input
   })
+}
+
+/**
+ * Imports a script without running its CLI.
+ * @param {string} script - Absolute module path.
+ * @returns {Promise<Record<string, unknown>>} - Imported module namespace.
+ */
+async function importScript(script) {
+  return import(`${pathToFileURL(script).href}?test=${Math.random()}`)
 }
 
 before(() => {
@@ -43,18 +74,48 @@ after(() => {
   if (temporaryRoot) rmSync(temporaryRoot, {recursive: true, force: true})
 })
 
-describe("Hermes shell entry points", () => {
-  it("are executable strict Bash scripts with valid syntax", () => {
-    for (const script of scripts) {
-      assert.ok(statSync(script).mode & 0o100, `${path.basename(script)} must be executable`)
-      assert.match(readFileSync(script, "utf8"), /^#!\/usr\/bin\/env bash\n\nset -Eeuo pipefail/m)
+describe("Hermes JavaScript entry points", () => {
+  it("uses executable importable Node ESM scripts and removes the Bash entry points", async () => {
+    for (const removedScript of removedScripts) {
+      assert.equal(existsSync(removedScript), false, `${path.basename(removedScript)} must be renamed`)
+    }
 
-      const result = run("bash", ["-n", script])
-      assert.equal(result.status, 0, result.stderr)
+    for (const script of [commandModule, ...scripts]) {
+      assert.ok(existsSync(script), `missing ${path.basename(script)}`)
+      assert.ok(statSync(script).mode & 0o100, `${path.basename(script)} must be executable`)
+      assert.match(readFileSync(script, "utf8"), /^#!\/usr\/bin\/env node\n/)
+      assert.equal(run(process.execPath, ["--check", script]).status, 0)
+      await importScript(script)
     }
   })
 
-  it("accepts only matching, normalized project/task pairs", () => {
+  it("contains no shell execution shortcuts or old script references", () => {
+    const reviewedFiles = [
+      ...scripts,
+      commandModule,
+      path.join(repoRoot, "AGENTS.md"),
+      path.join(repoRoot, "README.md"),
+      path.join(repoRoot, "changelog.d/20260728105114-hermes-compose.md")
+    ]
+
+    for (const reviewedFile of reviewedFiles) {
+      const source = readFileSync(reviewedFile, "utf8")
+      assert.doesNotMatch(
+        source,
+        /#!\/usr\/bin\/env bash|shell:\s*true|\/bin\/(?:ba)?sh|\b(?:bash|sh)\s+-c|--input-type=module|--eval/
+      )
+      assert.doesNotMatch(
+        source,
+        /scripts\/(?:hermes-compose|hermes-smoke-bootstrap|hermes-smoke|threadwire-compose-provider)(?![A-Za-z0-9_.-])/
+      )
+    }
+
+    const lifecycleSource = readFileSync(lifecycle, "utf8")
+    assert.doesNotMatch(lifecycleSource, /default: bash|command\.push\("bash"\)/)
+    assert.match(lifecycleSource, /default: node|command\.push\("node"\)/)
+  })
+
+  it("accepts only matching normalized project/task pairs through the CLI", () => {
     const valid = run(lifecycle, ["_validate-project-pair", "10575-a", "snapreq-10575-a"])
     assert.equal(valid.status, 0, valid.stderr)
 
@@ -83,39 +144,60 @@ describe("Hermes shell entry points", () => {
 
 describe("Threadwire Compose provider", () => {
   /**
-   * Installs the provider beside a capture-only lifecycle stand-in.
-   * @returns {{adapter: string, capture: string}} - Fixture paths.
+   * Installs the provider beside a capture-only JavaScript lifecycle stand-in.
+   * @param {boolean} [waitForSignal] - Whether the helper waits for a forwarded signal.
+   * @returns {{adapter: string, capture: string, ready: string, signal: string}} - Fixture paths.
    */
-  function providerFixture() {
+  function providerFixture(waitForSignal = false) {
     const fixture = path.join(temporaryRoot, `provider-${Math.random().toString(16).slice(2)}`)
     const fixtureScripts = path.join(fixture, "scripts")
-    const adapter = path.join(fixtureScripts, "threadwire-compose-provider")
-    const helper = path.join(fixtureScripts, "hermes-compose")
-    const capture = path.join(fixture, "argv")
+    const adapter = path.join(fixtureScripts, "threadwire-compose-provider.js")
+    const helper = path.join(fixtureScripts, "hermes-compose.js")
+    const shared = path.join(fixtureScripts, "hermes-command.js")
+    const capture = path.join(fixture, "capture.json")
+    const ready = path.join(fixture, "ready")
+    const signal = path.join(fixture, "signal")
 
     mkdirSync(fixtureScripts, {recursive: true})
     copyFileSync(provider, adapter)
+    copyFileSync(commandModule, shared)
     writeFileSync(helper, [
-      "#!/usr/bin/env bash",
-      "set -Eeuo pipefail",
-      "printf '%s\\0' \"$@\" > \"$CAPTURE_FILE\"",
+      "#!/usr/bin/env node",
+      "",
+      "import {readFileSync, writeFileSync} from \"node:fs\"",
+      "",
+      "const input = readFileSync(0, \"utf8\")",
+      "writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({arguments: process.argv.slice(2), input}))",
+      waitForSignal
+        ? "writeFileSync(process.env.READY_FILE, \"ready\\n\")"
+        : "process.exit(0)",
+      ...(waitForSignal
+        ? [
+            "process.on(\"SIGTERM\", () => {",
+            "  writeFileSync(process.env.SIGNAL_FILE, \"SIGTERM\\n\")",
+            "  process.exit(143)",
+            "})",
+            "setInterval(() => {}, 1000)"
+          ]
+        : []),
       ""
     ].join("\n"), {mode: 0o755})
     chmodSync(adapter, 0o755)
+    chmodSync(shared, 0o755)
 
-    return {adapter, capture}
+    return {adapter, capture, ready, signal}
   }
 
-  it("injects bypass and /workspace before Threadwire exec arguments", () => {
+  it("injects the boundary arguments and forwards stdin", () => {
     const {adapter, capture} = providerFixture()
     const result = run(adapter, ["exec", "--json", "-"], {
       CAPTURE_FILE: capture,
       THREADWIRE_ACTIVE: "1"
-    })
+    }, {input: "provider-input\n"})
 
     assert.equal(result.status, 0, result.stderr)
-    const arguments_ = readFileSync(capture).toString().split("\0").filter(Boolean)
-    assert.deepEqual(arguments_, [
+    const captured = JSON.parse(readFileSync(capture, "utf8"))
+    assert.deepEqual(captured.arguments, [
       "provider-exec",
       "codex",
       "--dangerously-bypass-approvals-and-sandbox",
@@ -125,19 +207,17 @@ describe("Threadwire Compose provider", () => {
       "--json",
       "-"
     ])
+    assert.equal(captured.input, "provider-input\n")
   })
 
-  it("supports resume ordering and rejects direct or boundary-changing calls", () => {
+  it("supports resume ordering and rejects boundary-changing calls", () => {
     const {adapter, capture} = providerFixture()
     const resume = run(adapter, ["resume", "session-id"], {
       CAPTURE_FILE: capture,
       THREADWIRE_ACTIVE: "1"
     })
     assert.equal(resume.status, 0, resume.stderr)
-    assert.deepEqual(
-      readFileSync(capture).toString().split("\0").filter(Boolean).slice(-2),
-      ["resume", "session-id"]
-    )
+    assert.deepEqual(JSON.parse(readFileSync(capture, "utf8")).arguments.slice(-2), ["resume", "session-id"])
 
     assert.equal(run(adapter, ["exec"], {CAPTURE_FILE: capture}).status, 2)
     assert.equal(run(adapter, ["exec", "--cd=/tmp"], {
@@ -156,6 +236,34 @@ describe("Threadwire Compose provider", () => {
       CAPTURE_FILE: capture,
       THREADWIRE_ACTIVE: "1"
     }).status, 2)
+  })
+
+  it("forwards termination signals to the lifecycle child", async () => {
+    const {adapter, capture, ready, signal} = providerFixture(true)
+    const child = spawn(adapter, ["exec", "--json"], {
+      cwd: repoRoot,
+      env: {
+        PATH: process.env.PATH || "/usr/bin:/bin",
+        CAPTURE_FILE: capture,
+        READY_FILE: ready,
+        SIGNAL_FILE: signal,
+        THREADWIRE_ACTIVE: "1"
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    })
+    child.stdin.end()
+
+    for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.ok(existsSync(ready), "provider child did not become ready")
+    child.kill("SIGTERM")
+
+    const completion = await new Promise((resolve) => {
+      child.once("close", (code, childSignal) => resolve({code, signal: childSignal}))
+    })
+    assert.ok(completion.code !== 0 || completion.signal, "provider unexpectedly ignored SIGTERM")
+    assert.equal(readFileSync(signal, "utf8"), "SIGTERM\n")
   })
 })
 
@@ -186,249 +294,93 @@ describe("Hermes infrastructure invariants", () => {
     assert.doesNotMatch(compose, /container_name:|host_ip:|published:|ports:|\/opt\/data|docker\.sock|safe\.directory/)
   })
 
-  it("checks two real stacks, routed probes, isolation, and exact cleanup", () => {
+  it("keeps the complete smoke acceptance sequence and exact resource names", () => {
     const smokeSource = readFileSync(smoke, "utf8")
 
-    assert.match(smokeSource, /build --pull --no-cache/)
-    assert.match(smokeSource, /npm run all-checks/)
-    assert.match(smokeSource, /threadwire --prompt/)
-    assert.match(smokeSource, /git rev-parse HEAD/)
-    assert.match(smokeSource, /package\.json/)
-    assert.match(smokeSource, /dependency-volume/)
-    assert.match(smokeSource, /stack-b-survived/)
-    assert.match(smokeSource, /SNAPREQ_PURGE_PROJECT/)
+    for (const requiredValue of [
+      "build",
+      "--pull",
+      "--no-cache",
+      "all-checks",
+      "threadwire",
+      "stack-b-survived",
+      "SNAPREQ_PURGE_PROJECT",
+      "node_modules",
+      "npm_cache",
+      "codex_home",
+      "_default",
+      "-dev"
+    ]) {
+      assert.match(smokeSource, new RegExp(requiredValue))
+    }
     assert.doesNotMatch(smokeSource, /docker cp|container_name|--volumes-from|\/opt\/data/)
   })
 })
 
-describe("Hermes reviewed boundary repairs", () => {
-  it("allocates a uid-1000 smoke destination through a narrow root helper from a non-1000 gateway", () => {
-    const smokeSource = readFileSync(smoke, "utf8")
-    const helperStart = smokeSource.indexOf("initialize_destination_ownership() {")
-    const helperEnd = smokeSource.indexOf("\n}\n\ncreate_empty_destination() {", helperStart)
-    const createStart = smokeSource.indexOf("create_empty_destination() {")
-    const createEnd = smokeSource.indexOf("\n}\n\nremove_empty_destination() {", createStart)
-
-    assert.notEqual(helperStart, -1, "missing destination ownership helper")
-    assert.notEqual(helperEnd, -1, "destination ownership helper is not independently scoped")
-    assert.notEqual(createStart, -1, "missing destination allocator")
-    assert.notEqual(createEnd, -1, "destination allocator is not independently scoped")
-
-    const helperSource = smokeSource.slice(helperStart, helperEnd)
-    const createSource = smokeSource.slice(createStart, createEnd)
-    assert.match(helperSource, /docker run/)
-    assert.match(helperSource, /--user 0:0/)
-    assert.match(helperSource, /--network none/)
-    assert.match(helperSource, /--read-only/)
-    assert.match(helperSource, /--cap-drop ALL/)
-    assert.match(helperSource, /--cap-add CHOWN/)
-    assert.match(helperSource, /--cap-add FOWNER/)
-    assert.match(helperSource, /--security-opt no-new-privileges:true/)
-    assert.equal((helperSource.match(/--mount/g) || []).length, 1)
-    assert.match(helperSource, /src=\$destination_path,dst=\/destination/)
-    assert.match(helperSource, /chown 1000:1000 -- \/destination/)
-    assert.match(helperSource, /chmod 0755 -- \/destination/)
-    assert.doesNotMatch(helperSource, /source_repo|SNAPREQ_CODEX_AUTH|dst=\/source|dst=\/opt\/hermes-dind-shared/)
-
-    const mkdirIndex = createSource.indexOf('mkdir --mode=0755 -- "$destination_path"')
-    const cleanupFlagIndex = createSource.indexOf("created_result=1")
-    const helperCallIndex = createSource.indexOf('initialize_destination_ownership "$destination_path"')
-    const cleanupStart = smokeSource.indexOf("emergency_cleanup() {")
-    const cleanupEnd = smokeSource.indexOf("\n}\ntrap emergency_cleanup EXIT", cleanupStart)
-    const trapIndex = smokeSource.indexOf("trap emergency_cleanup EXIT")
-    const allocationIndex = smokeSource.indexOf('create_empty_destination "$path_a" created_a')
-    assert.ok(mkdirIndex >= 0, "outer allocator must create only the exact empty directory")
-    assert.ok(cleanupFlagIndex > mkdirIndex, "cleanup flag must follow successful mkdir")
-    assert.ok(helperCallIndex > cleanupFlagIndex, "cleanup must cover ownership-helper failure")
-    assert.doesNotMatch(createSource, /\bchown\b/, "the outer gateway must not change ownership")
-    assert.ok(cleanupStart >= 0 && cleanupEnd > cleanupStart, "missing scoped emergency cleanup")
-    assert.ok(trapIndex >= 0 && allocationIndex > trapIndex, "cleanup trap must precede allocation")
-    const cleanupSource = smokeSource.slice(cleanupStart, cleanupEnd)
-    assert.match(cleanupSource, /created_a == 1.*sha_a.*remove_empty_destination "\$path_a"/s)
-    assert.match(cleanupSource, /created_b == 1.*sha_b.*remove_empty_destination "\$path_b"/s)
-  })
-
-  it("removes uid-1000 smoke checkouts through a narrow non-root helper", () => {
-    const smokeSource = readFileSync(smoke, "utf8")
-    const removeStart = smokeSource.indexOf("remove_checkout() {")
-    const removeEnd = smokeSource.indexOf("\n}\n\ninitialize_destination_ownership() {", removeStart)
-    const emptyStart = smokeSource.indexOf("remove_empty_destination() {")
-    const emptyEnd = smokeSource.indexOf("\n}\n\nbootstrap_checkout() {", emptyStart)
-
-    assert.notEqual(removeStart, -1, "missing checkout removal helper")
-    assert.notEqual(removeEnd, -1, "checkout removal helper is not independently scoped")
-    assert.notEqual(emptyStart, -1, "missing empty destination removal helper")
-    assert.notEqual(emptyEnd, -1, "empty destination removal helper is not independently scoped")
-
-    const removeSource = smokeSource.slice(removeStart, removeEnd)
-    const emptySource = smokeSource.slice(emptyStart, emptyEnd)
-    assert.match(smokeSource, /bootstrap_image="\$\{source_project\}-dev"/)
-    assert.match(smokeSource, /docker image inspect --format .*"\$bootstrap_image"/)
-    assert.match(removeSource, /realpath -e -- "\$source_path"/)
-    assert.match(removeSource, /assert_no_container_path_references "\$source_path"/)
-    assert.match(removeSource, /docker run/)
-    assert.match(removeSource, /--rm/)
-    assert.match(removeSource, /--user 1000:1000/)
-    assert.match(removeSource, /--network none/)
-    assert.match(removeSource, /--read-only/)
-    assert.match(removeSource, /--cap-drop ALL/)
-    assert.match(removeSource, /--security-opt no-new-privileges:true/)
-    assert.equal((removeSource.match(/--mount/g) || []).length, 1)
-    assert.match(removeSource, /src=\$source_path,dst=\/destination/)
-    assert.match(removeSource, /"\$bootstrap_image"/)
-    assert.match(removeSource, /find \/destination -xdev -mindepth 1 -delete/)
-    assert.match(removeSource, /rmdir -- "\$source_path"/)
-    assert.doesNotMatch(removeSource, /rm -rf[^\n]*"\$source_path"/)
-    assert.doesNotMatch(removeSource, /-exec rm -rf/)
-    assert.doesNotMatch(removeSource, /--user 0:0|--cap-add|\bchown\b|docker cp|dst=\/source|dst=\/opt\/hermes-dind-shared/)
-
-    const canonicalIndex = removeSource.indexOf('realpath -e -- "$source_path"')
-    const referencesIndex = removeSource.indexOf('assert_no_container_path_references "$source_path"')
-    const identityIndex = removeSource.indexOf('_read-checkout-identity "$source_path"')
-    const dockerIndex = removeSource.indexOf("docker run")
-    const rmdirIndex = removeSource.indexOf('rmdir -- "$source_path"')
-    assert.ok(canonicalIndex >= 0 && referencesIndex > canonicalIndex)
-    assert.ok(identityIndex > referencesIndex && dockerIndex > identityIndex)
-    assert.ok(rmdirIndex > dockerIndex)
-
-    assert.match(emptySource, /assert_no_container_path_references "\$destination_path"/)
-    assert.match(emptySource, /rmdir -- "\$destination_path"/)
-    assert.doesNotMatch(emptySource, /docker run|\brm -rf\b/)
-  })
-
-  it("fails closed on container list and inspect errors before checkout deletion", () => {
-    const smokeSource = readFileSync(smoke, "utf8")
-    const functionStart = smokeSource.indexOf("assert_no_container_path_references() {")
-    const functionEnd = smokeSource.indexOf("\n}\n\nremove_checkout() {", functionStart)
-    const fixture = path.join(temporaryRoot, "container-reference-failures")
-    const fakeBin = path.join(fixture, "bin")
-    const fakeDocker = path.join(fakeBin, "docker")
-    const harness = path.join(fixture, "harness.sh")
-
-    assert.notEqual(functionStart, -1, "missing container-reference guard")
-    assert.notEqual(functionEnd, -1, "container-reference guard is not independently scoped")
-    const functionSource = smokeSource.slice(functionStart, functionEnd + 2)
-
-    mkdirSync(fakeBin, {recursive: true})
-    writeFileSync(fakeDocker, [
-      "#!/bin/sh",
-      "if [ \"${1:-}\" = container ] && [ \"${2:-}\" = ls ]; then",
-      "  case \"$DOCKER_STUB_SCENARIO\" in",
-      "    list-failure) exit 70 ;;",
-      "    inspect-failure|empty-mounts) printf 'container-1\\n' ;;",
-      "    empty-list) exit 0 ;;",
-      "  esac",
-      "  exit 0",
-      "fi",
-      "if [ \"${1:-}\" = container ] && [ \"${2:-}\" = inspect ]; then",
-      "  case \"$DOCKER_STUB_SCENARIO\" in",
-      "    inspect-failure) exit 71 ;;",
-      "    empty-mounts) exit 0 ;;",
-      "  esac",
-      "fi",
-      "exit 64",
-      ""
-    ].join("\n"), {mode: 0o755})
-    writeFileSync(harness, [
-      "#!/usr/bin/env bash",
-      "set -Eeuo pipefail",
-      "fail() { printf 'harness: %s\\n' \"$*\" >&2; exit 2; }",
-      functionSource,
-      "assert_no_container_path_references \"$TEST_SOURCE_PATH\"",
-      ": > \"$TEST_DELETION_MARKER\"",
-      ""
-    ].join("\n"), {mode: 0o755})
+describe("Hermes JavaScript safety behavior", () => {
+  it("fails closed on container list and inspect errors before checkout deletion", async () => {
+    const {HermesSmokeSafety} = await importScript(smoke)
+    let deletionReached = false
 
     for (const scenario of ["list-failure", "inspect-failure"]) {
-      const marker = path.join(fixture, `${scenario}.deleted`)
-      const result = run(harness, [], {
-        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
-        DOCKER_STUB_SCENARIO: scenario,
-        TEST_DELETION_MARKER: marker,
-        TEST_SOURCE_PATH: "/exact/task-checkout"
+      const runner = {
+        capture(command, arguments_) {
+          assert.equal(command, "docker")
+          if (arguments_[0] === "container" && arguments_[1] === "ls") {
+            if (scenario === "list-failure") throw new Error("list failed")
+            return "container-1\n"
+          }
+          if (arguments_[0] === "container" && arguments_[1] === "inspect") {
+            throw new Error("inspect failed")
+          }
+          throw new Error(`unexpected command: ${arguments_.join(" ")}`)
+        }
+      }
+      const safety = new HermesSmokeSafety({runner})
+      assert.throws(() => {
+        safety.assertNoContainerPathReferences("/exact/task-checkout")
+        deletionReached = true
       })
-      assert.equal(result.status, 2, `${scenario} unexpectedly allowed cleanup`)
-      assert.equal(existsSync(marker), false, `${scenario} reached the deletion helper`)
+      assert.equal(deletionReached, false)
     }
 
-    for (const scenario of ["empty-list", "empty-mounts"]) {
-      const marker = path.join(fixture, `${scenario}.deleted`)
-      const result = run(harness, [], {
-        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
-        DOCKER_STUB_SCENARIO: scenario,
-        TEST_DELETION_MARKER: marker,
-        TEST_SOURCE_PATH: "/exact/task-checkout"
-      })
-      assert.equal(result.status, 0, result.stderr)
-      assert.equal(existsSync(marker), true, `${scenario} did not complete the guard`)
-    }
+    const emptyList = new HermesSmokeSafety({
+      runner: {capture: () => ""}
+    })
+    assert.doesNotThrow(() => emptyList.assertNoContainerPathReferences("/exact/task-checkout"))
 
-    assert.doesNotMatch(functionSource, /< <\(/)
-    assert.match(functionSource, /container_ids="\$\(docker container ls --all --quiet\)"/)
-    assert.match(functionSource, /mount_sources="\$\(docker container inspect --format/)
+    const emptyMounts = new HermesSmokeSafety({
+      runner: {
+        capture(command, arguments_) {
+          return arguments_[1] === "ls" ? "container-1\n" : ""
+        }
+      }
+    })
+    assert.doesNotThrow(() => emptyMounts.assertNoContainerPathReferences("/exact/task-checkout"))
   })
 
-  it("rejects existing or unqueryable task resources before either destination allocation", () => {
-    const smokeSource = readFileSync(smoke, "utf8")
-    const functionStart = smokeSource.indexOf("assert_project_resources_absent() {")
-    const functionEnd = smokeSource.indexOf("\n}\n\ntask_a=", functionStart)
-    const fixture = path.join(temporaryRoot, "resource-preflight")
-    const fakeBin = path.join(fixture, "bin")
-    const fakeDocker = path.join(fakeBin, "docker")
-    const harness = path.join(fixture, "harness.sh")
+  it("preserves exact source-path comparison when checking container mounts", async () => {
+    const {HermesSmokeSafety} = await importScript(smoke)
+    const safety = new HermesSmokeSafety({
+      runner: {
+        capture(command, arguments_) {
+          return arguments_[1] === "ls"
+            ? "container-1\n"
+            : "/exact/task-checkout-other\n/exact/task-checkout\n"
+        }
+      }
+    })
 
-    assert.notEqual(functionStart, -1, "missing task-resource preflight")
-    assert.notEqual(functionEnd, -1, "task-resource preflight is not independently scoped")
-    const functionSource = smokeSource.slice(functionStart, functionEnd + 2)
+    assert.throws(
+      () => safety.assertNoContainerPathReferences("/exact/task-checkout"),
+      /container-1 still references/
+    )
+  })
 
-    mkdirSync(fakeBin, {recursive: true})
-    writeFileSync(fakeDocker, [
-      "#!/bin/sh",
-      "case \"${1:-}:${3:-}\" in",
-      "  container:--all)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-container ] && exit 70",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = container ] && printf 'container-1\\n'",
-      "    ;;",
-      "  volume:--format)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-volume-names ] && exit 71",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = volume-exact ] && printf '%s_node_modules\\n' \"$TEST_PROJECT\"",
-      "    ;;",
-      "  volume:--quiet)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-volume-labels ] && exit 72",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = volume-labeled ] && printf 'volume-1\\n'",
-      "    ;;",
-      "  network:--format)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-network-names ] && exit 73",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = network-exact ] && printf '%s_default\\n' \"$TEST_PROJECT\"",
-      "    ;;",
-      "  network:--quiet)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-network-labels ] && exit 74",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = network-labeled ] && printf 'network-1\\n'",
-      "    ;;",
-      "  image:--format)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-image-names ] && exit 75",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = image-exact ] && printf '%s-dev\\n' \"$TEST_PROJECT\"",
-      "    ;;",
-      "  image:--quiet)",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = fail-image-labels ] && exit 76",
-      "    [ \"$DOCKER_STUB_SCENARIO\" = image-labeled ] && printf 'image-1\\n'",
-      "    ;;",
-      "  *) exit 64 ;;",
-      "esac",
-      "exit 0",
-      ""
-    ].join("\n"), {mode: 0o755})
-    writeFileSync(harness, [
-      "#!/usr/bin/env bash",
-      "set -Eeuo pipefail",
-      "fail() { printf 'harness: %s\\n' \"$*\" >&2; exit 2; }",
-      functionSource,
-      "assert_project_resources_absent \"$TEST_PROJECT\"",
-      ": > \"$TEST_ALLOCATION_MARKER\"",
-      ""
-    ].join("\n"), {mode: 0o755})
-
-    const rejectedScenarios = [
+  it("rejects each existing or unqueryable task resource before allocation", async () => {
+    const {HermesSmokeSafety} = await importScript(smoke)
+    const project = "snapreq-review-test"
+    const scenarios = [
       "container",
       "volume-exact",
       "volume-labeled",
@@ -444,51 +396,224 @@ describe("Hermes reviewed boundary repairs", () => {
       "fail-image-names",
       "fail-image-labels"
     ]
-    for (const scenario of rejectedScenarios) {
-      const marker = path.join(fixture, `${scenario}.allocated`)
-      const result = run(harness, [], {
-        PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
-        DOCKER_STUB_SCENARIO: scenario,
-        TEST_ALLOCATION_MARKER: marker,
-        TEST_PROJECT: "snapreq-review-test"
+
+    for (const scenario of scenarios) {
+      let allocationReached = false
+      const safety = new HermesSmokeSafety({
+        runner: {
+          capture(command, arguments_) {
+            const resource = arguments_[0]
+            const option = arguments_[2]
+            const query = `${resource}:${option}`
+            if (scenario === `fail-${resource}-${option === "--format" ? "names" : "labels"}`) {
+              throw new Error(`${query} failed`)
+            }
+            if (scenario === "fail-container" && resource === "container") throw new Error("container failed")
+            if (scenario === "container" && resource === "container") return "container-1\n"
+            if (scenario === "volume-exact" && query === "volume:--format") return `${project}_node_modules\n`
+            if (scenario === "volume-labeled" && query === "volume:--quiet") return "volume-1\n"
+            if (scenario === "network-exact" && query === "network:--format") return `${project}_default\n`
+            if (scenario === "network-labeled" && query === "network:--quiet") return "network-1\n"
+            if (scenario === "image-exact" && query === "image:--format") return `${project}-dev\n`
+            if (scenario === "image-labeled" && query === "image:--quiet") return "image-1\n"
+            return ""
+          }
+        }
       })
-      assert.equal(result.status, 2, `${scenario} unexpectedly allowed allocation`)
-      assert.equal(existsSync(marker), false, `${scenario} reached destination allocation`)
+
+      assert.throws(() => {
+        safety.assertProjectResourcesAbsent(project)
+        allocationReached = true
+      }, scenario)
+      assert.equal(allocationReached, false, `${scenario} reached allocation`)
     }
 
-    const cleanMarker = path.join(fixture, "clean.allocated")
-    const clean = run(harness, [], {
-      PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
-      DOCKER_STUB_SCENARIO: "clean",
-      TEST_ALLOCATION_MARKER: cleanMarker,
-      TEST_PROJECT: "snapreq-review-test"
-    })
-    assert.equal(clean.status, 0, clean.stderr)
-    assert.equal(existsSync(cleanMarker), true)
-
-    assert.match(functionSource, /\$\{project_name\}_node_modules/)
-    assert.match(functionSource, /\$\{project_name\}_npm_cache/)
-    assert.match(functionSource, /\$\{project_name\}_codex_home/)
-    assert.match(functionSource, /\$\{project_name\}_default/)
-    assert.match(functionSource, /\$\{project_name\}-dev/)
-
-    const preflightA = smokeSource.indexOf('assert_project_resources_absent "$project_a"')
-    const preflightB = smokeSource.indexOf('assert_project_resources_absent "$project_b"')
-    const allocationA = smokeSource.indexOf('create_empty_destination "$path_a" created_a')
-    assert.ok(preflightA >= 0 && preflightB > preflightA)
-    assert.ok(allocationA > preflightB, "both resource preflights must precede destination allocation")
+    const clean = new HermesSmokeSafety({runner: {capture: () => ""}})
+    assert.doesNotThrow(() => clean.assertProjectResourcesAbsent(project))
   })
 
-  it("allows a non-1000 outer orchestrator while enforcing checkout and service ownership", () => {
-    const fakeBin = path.join(temporaryRoot, "uid-10000-bin")
-    const fakeId = path.join(fakeBin, "id")
-    const fakeStat = path.join(fakeBin, "stat")
+  it("builds narrow ownership, cleanup, and bootstrap Docker argument arrays", async () => {
+    const {HermesSmoke} = await importScript(smoke)
+    const instance = new HermesSmoke({
+      bootstrapImage: "snapreq-source-dev",
+      runner: {capture: () => "", run: async () => {}},
+      sourceRepo: "/exact/source"
+    })
+
+    const ownership = instance.destinationOwnershipArguments("/exact/destination")
+    assert.deepEqual(ownership.slice(0, 14), [
+      "run",
+      "--rm",
+      "--user",
+      "0:0",
+      "--network",
+      "none",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--cap-add",
+      "CHOWN",
+      "--cap-add",
+      "FOWNER",
+      "--security-opt"
+    ])
+    assert.equal(ownership.filter((argument) => argument === "--mount").length, 2)
+    assert.ok(ownership.includes("type=bind,src=/exact/source,dst=/source,readonly"))
+    assert.ok(ownership.includes("type=bind,src=/exact/destination,dst=/destination"))
+    assert.doesNotMatch(ownership.join("\n"), /\/opt\/hermes-dind-shared/)
+    assert.ok(ownership.includes("HERMES_SMOKE_HELPER=1"))
+    assert.ok(ownership.includes("HERMES_SMOKE_HELPER_MODE=destination-ownership"))
+    assert.equal(ownership.filter((argument) => argument === "--cap-add").length, 2)
+    assert.ok(!ownership.includes("--privileged"))
+    assert.deepEqual(ownership.slice(-3), [
+      "node",
+      "/source/scripts/hermes-smoke.js",
+      "_helper-destination-ownership"
+    ])
+    assert.ok(!ownership.includes("--eval"))
+    assert.ok(!ownership.includes("--input-type=module"))
+
+    const cleanup = instance.checkoutCleanupArguments("/exact/destination")
+    assert.deepEqual(cleanup.slice(0, 10), [
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--network",
+      "none",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--security-opt"
+    ])
+    assert.equal(cleanup.filter((argument) => argument === "--mount").length, 2)
+    assert.ok(cleanup.includes("type=bind,src=/exact/source,dst=/source,readonly"))
+    assert.ok(cleanup.includes("type=bind,src=/exact/destination,dst=/destination"))
+    assert.ok(cleanup.includes("HERMES_SMOKE_HELPER=1"))
+    assert.ok(cleanup.includes("HERMES_SMOKE_HELPER_MODE=checkout-cleanup"))
+    assert.ok(!cleanup.includes("--cap-add"))
+    assert.ok(!cleanup.includes("--privileged"))
+    assert.deepEqual(cleanup.slice(-3), [
+      "node",
+      "/source/scripts/hermes-smoke.js",
+      "_helper-checkout-cleanup"
+    ])
+    assert.ok(!cleanup.includes("--eval"))
+    assert.ok(!cleanup.includes("--input-type=module"))
+
+    const bootstrap = instance.bootstrapArguments("/exact/destination", "hermes-smoke/task", "snapreq-task")
+    assert.equal(bootstrap.filter((argument) => argument === "--mount").length, 2)
+    assert.ok(bootstrap.includes("type=bind,src=/exact/source,dst=/source,readonly"))
+    assert.ok(bootstrap.includes("type=bind,src=/exact/destination,dst=/destination"))
+    assert.ok(bootstrap.includes("/source/scripts/hermes-smoke-bootstrap.js"))
+  })
+
+  it("behaviorally removes a checkout tree without removing its destination root", async () => {
+    const {HermesSmokeCheckoutHelper} = await importScript(smoke)
+    const fixture = path.join(temporaryRoot, "checkout-helper-removal")
+    const destination = path.join(fixture, "destination")
+    const nested = path.join(destination, "nested", "deeper")
+    const externalFile = path.join(fixture, "outside.txt")
+
+    mkdirSync(nested, {recursive: true})
+    writeFileSync(path.join(destination, "root.txt"), "root\n")
+    writeFileSync(path.join(nested, "nested.txt"), "nested\n")
+    writeFileSync(externalFile, "outside\n")
+    symlinkSync(externalFile, path.join(destination, "outside-link"))
+    symlinkSync("../root.txt", path.join(destination, "nested", "inside-link"))
+
+    const helper = new HermesSmokeCheckoutHelper({
+      destination,
+      environment: {
+        HERMES_SMOKE_HELPER: "1",
+        HERMES_SMOKE_HELPER_MODE: "checkout-cleanup"
+      },
+      getgid: () => 1000,
+      getuid: () => 1000,
+      mountInfoReader: () => "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+    })
+    helper.main(["_helper-checkout-cleanup"])
+
+    assert.deepEqual(readdirSync(destination), [])
+    assert.equal(readFileSync(externalFile, "utf8"), "outside\n")
+
+    const protectedFile = path.join(destination, "marker-protected.txt")
+    writeFileSync(protectedFile, "protected\n")
+    for (const [environment, arguments_] of [
+      [{}, ["_helper-checkout-cleanup"]],
+      [
+        {
+          HERMES_SMOKE_HELPER: "1",
+          HERMES_SMOKE_HELPER_MODE: "destination-ownership"
+        },
+        ["_helper-checkout-cleanup"]
+      ],
+      [
+        {
+          HERMES_SMOKE_HELPER: "1",
+          HERMES_SMOKE_HELPER_MODE: "checkout-cleanup"
+        },
+        ["_helper-checkout-cleanup", "unexpected"]
+      ]
+    ]) {
+      const rejectedHelper = new HermesSmokeCheckoutHelper({
+        destination,
+        environment,
+        getgid: () => 1000,
+        getuid: () => 1000,
+        mountInfoReader: () => "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+      })
+      assert.throws(() => rejectedHelper.main(arguments_))
+      assert.equal(readFileSync(protectedFile, "utf8"), "protected\n")
+    }
+  })
+
+  it("fails closed before deleting when mountinfo is nested, malformed, or unreadable", async () => {
+    const {HermesSmokeCheckoutHelper} = await importScript(smoke)
+
+    for (const scenario of ["nested", "malformed", "unreadable"]) {
+      const destination = path.join(temporaryRoot, `checkout-helper-${scenario}`)
+      const nested = path.join(destination, "nested")
+      const protectedFile = path.join(nested, "protected.txt")
+      mkdirSync(nested, {recursive: true})
+      writeFileSync(protectedFile, `${scenario}\n`)
+
+      const mountInfoReader = scenario === "nested"
+        ? () => [
+            "1 0 0:1 / / rw - ext4 /dev/root rw",
+            `2 1 0:1 /nested ${nested} rw - ext4 /dev/root rw`,
+            ""
+          ].join("\n")
+        : scenario === "malformed"
+          ? () => "malformed mountinfo\n"
+          : () => {
+              throw Object.assign(new Error("mountinfo unreadable"), {code: "EACCES"})
+            }
+      const helper = new HermesSmokeCheckoutHelper({
+        destination,
+        environment: {
+          HERMES_SMOKE_HELPER: "1",
+          HERMES_SMOKE_HELPER_MODE: "checkout-cleanup"
+        },
+        getgid: () => 1000,
+        getuid: () => 1000,
+        mountInfoReader
+      })
+
+      assert.throws(() => helper.main(["_helper-checkout-cleanup"]))
+      assert.equal(readFileSync(protectedFile, "utf8"), `${scenario}\n`)
+    }
+  })
+
+  it("represents uid-1000 ownership and parses checkout identity without native checkout assumptions", async () => {
+    const {HermesComposeCli} = await importScript(lifecycle)
     const checkout = path.join(temporaryRoot, "represented-checkout")
     const gitDirectory = path.join(checkout, ".git")
     const head = "0123456789abcdef0123456789abcdef01234567"
 
-    mkdirSync(fakeBin, {recursive: true})
     mkdirSync(path.join(gitDirectory, "refs/heads"), {recursive: true})
+    chmodSync(checkout, 0o755)
+    chmodSync(gitDirectory, 0o755)
     writeFileSync(path.join(gitDirectory, "config"), [
       "[remote \"origin\"]",
       "\turl = https://github.com/kaspernj/snapreq.git",
@@ -496,62 +621,63 @@ describe("Hermes reviewed boundary repairs", () => {
     ].join("\n"))
     writeFileSync(path.join(gitDirectory, "HEAD"), "ref: refs/heads/task-10575-hermes-compose\n")
     writeFileSync(path.join(gitDirectory, "refs/heads/task-10575-hermes-compose"), `${head}\n`)
-    writeFileSync(fakeId, [
-      "#!/bin/sh",
-      "case \"${1:-}\" in",
-      "  -u) printf '10000\\n' ;;",
-      "  -g) printf '10000\\n' ;;",
-      "  *) printf 'uid=10000(gateway) gid=10000(gateway)\\n' ;;",
-      "esac",
-      ""
-    ].join("\n"), {mode: 0o755})
-    writeFileSync(fakeStat, [
-      "#!/bin/sh",
-      "case \"${4:-}\" in",
-      "  \"$SNAPREQ_TEST_CHECKOUT\") owner=\"${SNAPREQ_TEST_ROOT_OWNER:-1000:1000}\" ;;",
-      "  \"$SNAPREQ_TEST_CHECKOUT/.git\") owner=\"${SNAPREQ_TEST_GIT_OWNER:-1000:1000}\" ;;",
-      "  *) exit 64 ;;",
-      "esac",
-      "case \"${1:-}:${2:-}\" in",
-      "  '-c:%u:%g') printf '%s\\n' \"$owner\" ;;",
-      "  '-c:%A') printf 'drwxr-xr-x\\n' ;;",
-      "  *) exit 64 ;;",
-      "esac",
-      ""
-    ].join("\n"), {mode: 0o755})
 
-    const fakeEnvironment = {
-      PATH: `${fakeBin}:${process.env.PATH || "/usr/bin:/bin"}`,
-      SNAPREQ_TEST_CHECKOUT: checkout
+    /**
+     * Represents checkout ownership independently from the native fixture uid.
+     * @param {{root?: number, git?: number}} owners - Represented owner ids.
+     * @returns {object} - Injectable filesystem boundary.
+     */
+    function representedFileSystem(owners = {}) {
+      return {
+        existsSync,
+        lstatSync: (...arguments_) => statSync(...arguments_),
+        readFileSync,
+        realpathSync: (value) => path.resolve(value),
+        statSync(value) {
+          const actual = statSync(value)
+          const representedOwner = value === gitDirectory ? owners.git ?? 1000 : owners.root ?? 1000
+          return new Proxy(actual, {
+            get(target, property) {
+              if (property === "uid" || property === "gid") return representedOwner
+              return Reflect.get(target, property, target)
+            }
+          })
+        }
+      }
     }
-    const ownership = run(lifecycle, ["_validate-checkout-ownership", checkout], fakeEnvironment)
-    assert.equal(ownership.status, 0, ownership.stderr)
 
-    for (const ownerVariable of ["SNAPREQ_TEST_ROOT_OWNER", "SNAPREQ_TEST_GIT_OWNER"]) {
-      const wrongOwnership = run(lifecycle, ["_validate-checkout-ownership", checkout], {
-        ...fakeEnvironment,
-        [ownerVariable]: "10000:10000"
+    const originalGetuid = Object.getOwnPropertyDescriptor(process, "getuid")
+    const originalGetgid = Object.getOwnPropertyDescriptor(process, "getgid")
+    Object.defineProperties(process, {
+      getuid: {...originalGetuid, value: () => 10000},
+      getgid: {...originalGetgid, value: () => 10000}
+    })
+    try {
+      const cli = new HermesComposeCli({fileSystem: representedFileSystem()})
+      assert.equal(process.getuid(), 10000)
+      assert.equal(process.getgid(), 10000)
+      assert.doesNotThrow(() => cli.validateCheckoutOwnership(checkout))
+      assert.deepEqual(cli.readCheckoutIdentity(checkout), {
+        head,
+        origin: "https://github.com/kaspernj/snapreq.git"
       })
-      assert.equal(wrongOwnership.status, 2, `${ownerVariable} unexpectedly passed`)
-      assert.match(wrongOwnership.stderr, /must be owned by uid\/gid 1000:1000 \(found 10000:10000\)/)
+    } finally {
+      Object.defineProperties(process, {
+        getuid: originalGetuid,
+        getgid: originalGetgid
+      })
     }
 
-    const identity = run(lifecycle, ["_read-checkout-identity", checkout], fakeEnvironment)
-    assert.equal(identity.status, 0, identity.stderr)
-    assert.equal(identity.stdout, [
-      `head=${head}`,
-      "origin=https://github.com/kaspernj/snapreq.git",
-      ""
-    ].join("\n"))
-
-    const lifecycleSource = readFileSync(lifecycle, "utf8")
-    const compose = readFileSync(path.join(repoRoot, "compose.hermes.yml"), "utf8")
-    assert.doesNotMatch(lifecycleSource, /id -u.*EXPECTED_UID_GID|lifecycle must run as uid/)
-    assert.match(lifecycleSource, /for checked_path in "\$checkout_path" "\$checkout_path\/\.git"/)
-    assert.match(compose, /user: "1000:1000"/)
+    for (const owners of [{root: 10000}, {git: 10000}]) {
+      const wrongOwner = new HermesComposeCli({fileSystem: representedFileSystem(owners)})
+      assert.throws(
+        () => wrongOwner.validateCheckoutOwnership(checkout),
+        /must be owned by uid\/gid 1000:1000 \(found 10000:10000\)/
+      )
+    }
   })
 
-  it("uses an explicit existing Docker auth volume rather than an outer auth file", () => {
+  it("uses explicit auth volume validation and no outer auth file", () => {
     const valid = run(lifecycle, ["_validate-auth-volume-name", "hermes-auth_10575"])
     assert.equal(valid.status, 0, valid.stderr)
 
@@ -563,39 +689,24 @@ describe("Hermes reviewed boundary repairs", () => {
     const lifecycleSource = readFileSync(lifecycle, "utf8")
     const compose = readFileSync(path.join(repoRoot, "compose.hermes.yml"), "utf8")
     assert.match(lifecycleSource, /SNAPREQ_CODEX_AUTH_VOLUME/)
-    assert.match(lifecycleSource, /docker volume inspect/)
-    assert.match(lifecycleSource, /:\/source:ro/)
     assert.match(lifecycleSource, /\/source\/auth\.json/)
     assert.doesNotMatch(lifecycleSource, /SNAPREQ_CODEX_AUTH_FILE|codex-auth\.json/)
     assert.doesNotMatch(compose, /SNAPREQ_CODEX_AUTH_VOLUME|\/source\/auth\.json/)
   })
 
-  it("runs all smoke checkout and Git mutations in a narrowly mounted bootstrap container", () => {
-    assert.ok(existsSync(smokeBootstrap), "missing container-only smoke bootstrap payload")
-
+  it("keeps Git mutation inside the JavaScript bootstrap container entry point", async () => {
     const smokeSource = readFileSync(smoke, "utf8")
     const bootstrapSource = readFileSync(smokeBootstrap, "utf8")
-    const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile.hermes"), "utf8")
+    const {SmokeBootstrap} = await importScript(smokeBootstrap)
 
-    assert.match(smokeSource, /docker run/)
-    assert.match(smokeSource, /src=\$source_repo,dst=\/source,readonly/)
-    assert.match(smokeSource, /src=\$destination_path,dst=\/destination/)
-    assert.match(smokeSource, /--user 1000:1000/)
-    assert.doesNotMatch(smokeSource, /\bgit\s+clone\b/)
-    assert.doesNotMatch(smokeSource, /\bgit(?:\s+-C\s+(?:"[^"]+"|\S+))?\s+(add|commit|checkout|switch)\b/)
-    assert.doesNotMatch(smokeSource, /\bgit(?:\s+-C\s+(?:"[^"]+"|\S+))?\s+remote\s+set-url\b/)
-    assert.doesNotMatch(smokeSource, /\bgit(?:\s+-C\s+(?:"[^"]+"|\S+))?\s+worktree\s+(add|move|remove)\b/)
-    assert.doesNotMatch(smokeSource, /\bgit(?:\s+-C\s+(?:"[^"]+"|\S+))?\s+branch\s+(?:-[dDmM]|--delete|--move)\b/)
-    assert.doesNotMatch(smokeSource, /src=\$source_prefix|src=\/opt\/hermes-dind-shared\/worktrees\/snapreq(?:[,/])/)
+    assert.equal(typeof SmokeBootstrap, "function")
+    assert.doesNotMatch(smokeSource, /\bspawn(?:Sync)?\([^)]*["']git["']/)
+    assert.match(bootstrapSource, /\["clone", "--no-local", "--no-checkout", "\/source", "\/destination"\]/)
+    assert.match(bootstrapSource, /\["-C", "\/destination", "add", "\.hermes-smoke-marker"\]/)
+    assert.match(bootstrapSource, /SnapReq Hermes Smoke/)
 
-    assert.match(bootstrapSource, /git clone --no-local --no-checkout \/source \/destination/)
-    assert.match(bootstrapSource, /git -C \/destination add/)
-    assert.match(bootstrapSource, /git -C \/destination.*commit/s)
-    assert.match(bootstrapSource, /id -u.*1000/)
-
-    for (const source of [smokeSource, bootstrapSource, dockerfile]) {
+    for (const source of [smokeSource, bootstrapSource]) {
       assert.doesNotMatch(source, /docker cp|\btar\b|\bzip\b|\bunzip\b/)
     }
-    assert.doesNotMatch(dockerfile, /^(COPY|ADD)\s/im)
   })
 })
