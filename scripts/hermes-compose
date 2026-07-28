@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+readonly EXPECTED_ORIGIN_HTTPS="https://github.com/kaspernj/snapreq.git"
+readonly EXPECTED_SOURCE_PREFIX="/opt/hermes-dind-shared/worktrees/snapreq/"
+readonly EXPECTED_UID_GID="1000:1000"
+
+fail() {
+  printf 'hermes-compose: %s\n' "$*" >&2
+  exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_dir="$(cd -- "$script_dir/.." && pwd -P)"
+compose_file="$repo_dir/compose.hermes.yml"
+
+validate_project_pair() {
+  local task_name="${1:-}"
+  local project_name="${2:-}"
+
+  [[ "$task_name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] \
+    || fail "task must contain only lowercase letters, digits, and internal hyphens"
+  [[ ${#project_name} -le 63 ]] || fail "Compose project name exceeds 63 characters"
+  [[ "$project_name" == "snapreq-$task_name" ]] \
+    || fail "SNAPREQ_COMPOSE_PROJECT must equal snapreq-<task>"
+}
+
+validate_checkout_ownership() {
+  local checkout_path="${1:-}"
+  [[ -d "$checkout_path" ]] || fail "checkout path does not exist"
+  [[ "$(realpath -e -- "$checkout_path")" == "$checkout_path" ]] \
+    || fail "checkout path must be canonical and may not be a symlink"
+  [[ -d "$checkout_path/.git" && ! -L "$checkout_path/.git" ]] \
+    || fail "source must be a self-contained checkout with its .git directory inside the exact mount"
+
+  local checked_path owner permissions
+  for checked_path in "$checkout_path" "$checkout_path/.git"; do
+    owner="$(stat -c '%u:%g' -- "$checked_path")"
+    [[ "$owner" == "$EXPECTED_UID_GID" ]] \
+      || fail "$checked_path must be owned by uid/gid $EXPECTED_UID_GID (found $owner)"
+    permissions="$(stat -c '%A' -- "$checked_path")"
+    [[ "${permissions:8:1}" != "w" ]] || fail "$checked_path may not be world-writable"
+  done
+}
+
+validate_auth_volume_name() {
+  local volume_name="${1:-}"
+  [[ "$volume_name" =~ ^[a-z0-9][a-z0-9_.-]{1,127}$ ]] \
+    || fail "SNAPREQ_CODEX_AUTH_VOLUME must be a 2-128 character lowercase Docker volume name"
+}
+
+read_checkout_origin() {
+  local checkout_path=$1
+  local origin
+
+  [[ -f "$checkout_path/.git/config" && ! -L "$checkout_path/.git/config" ]] \
+    || fail "source .git/config must be a regular file inside the exact checkout"
+  origin="$(
+    awk '
+      /^[[:space:]]*\[remote[[:space:]]+"origin"\][[:space:]]*$/ {
+        in_origin = 1
+        next
+      }
+      /^[[:space:]]*\[/ {
+        in_origin = 0
+      }
+      in_origin && /^[[:space:]]*url[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, "")
+        print
+        exit
+      }
+    ' "$checkout_path/.git/config"
+  )"
+  origin="${origin%$'\r'}"
+  [[ -n "$origin" && "$origin" != *[[:space:]]* ]] || fail "source has no unambiguous origin URL"
+  printf '%s\n' "$origin"
+}
+
+read_checkout_head() {
+  local checkout_path=$1
+  local git_directory="$checkout_path/.git"
+  local head_value reference reference_file head_sha
+
+  [[ -f "$git_directory/HEAD" && ! -L "$git_directory/HEAD" ]] \
+    || fail "source .git/HEAD must be a regular file inside the exact checkout"
+  IFS= read -r head_value < "$git_directory/HEAD" || fail "source has no readable .git/HEAD"
+  head_value="${head_value%$'\r'}"
+  if [[ "$head_value" == "ref: "* ]]; then
+    reference="${head_value#ref: }"
+    [[ "$reference" =~ ^refs/heads/[A-Za-z0-9._/-]+$ \
+      && "$reference" != *..* \
+      && "$reference" != *//* \
+      && "$reference" != */ ]] \
+      || fail "source HEAD contains an unsafe branch reference"
+    reference_file="$git_directory/$reference"
+    if [[ -f "$reference_file" && ! -L "$reference_file" ]]; then
+      IFS= read -r head_sha < "$reference_file" || fail "source branch reference is unreadable"
+      head_sha="${head_sha%$'\r'}"
+    else
+      [[ -f "$git_directory/packed-refs" && ! -L "$git_directory/packed-refs" ]] \
+        || fail "source branch reference is missing"
+      head_sha="$(
+        awk -v expected_reference="$reference" '
+          $1 ~ /^[0-9a-f]{40}$/ && $2 == expected_reference {
+            print $1
+            exit
+          }
+        ' "$git_directory/packed-refs"
+      )" || fail "source packed refs are unreadable"
+    fi
+  else
+    head_sha="$head_value"
+  fi
+  [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || fail "source HEAD is not a full SHA-1"
+  printf '%s\n' "$head_sha"
+}
+
+validate_source_and_project() {
+  [[ -n "${SNAPREQ_SOURCE_PATH:-}" ]] || fail "SNAPREQ_SOURCE_PATH is required"
+  [[ -n "${SNAPREQ_COMPOSE_PROJECT:-}" ]] || fail "SNAPREQ_COMPOSE_PROJECT is required"
+  [[ "$SNAPREQ_SOURCE_PATH" == "$EXPECTED_SOURCE_PREFIX"* ]] \
+    || fail "SNAPREQ_SOURCE_PATH must be an exact task checkout below $EXPECTED_SOURCE_PREFIX"
+
+  local task_name="${SNAPREQ_SOURCE_PATH#"$EXPECTED_SOURCE_PREFIX"}"
+  validate_project_pair "$task_name" "$SNAPREQ_COMPOSE_PROJECT"
+  [[ "$task_name" != */* ]] || fail "SNAPREQ_SOURCE_PATH must name one task directory, not a nested path"
+  [[ -d "$SNAPREQ_SOURCE_PATH" ]] || fail "SNAPREQ_SOURCE_PATH does not exist"
+
+  local canonical_source
+  canonical_source="$(realpath -e -- "$SNAPREQ_SOURCE_PATH")"
+  [[ "$canonical_source" == "$SNAPREQ_SOURCE_PATH" ]] \
+    || fail "SNAPREQ_SOURCE_PATH must already be canonical and may not be a symlink"
+  [[ "$canonical_source" == "$repo_dir" ]] \
+    || fail "run the lifecycle script from the same exact checkout it mounts"
+  validate_checkout_ownership "$canonical_source"
+
+  local origin
+  origin="$(read_checkout_origin "$canonical_source")"
+  case "$origin" in
+    "$EXPECTED_ORIGIN_HTTPS"|"${EXPECTED_ORIGIN_HTTPS%.git}"|"git@github.com:kaspernj/snapreq.git"|"ssh://git@github.com/kaspernj/snapreq.git")
+      ;;
+    *)
+      fail "source origin is not kaspernj/snapreq"
+      ;;
+  esac
+  read_checkout_head "$canonical_source" >/dev/null
+
+  [[ -f "$compose_file" ]] || fail "missing compose.hermes.yml"
+}
+
+require_compose() {
+  command -v docker >/dev/null 2>&1 || fail "docker is required on the outer Hermes host"
+  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
+}
+
+compose() {
+  COMPOSE_DISABLE_ENV_FILE=1 \
+    SNAPREQ_SOURCE_PATH="$SNAPREQ_SOURCE_PATH" \
+    SNAPREQ_COMPOSE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" \
+    docker compose \
+      -p "$SNAPREQ_COMPOSE_PROJECT" \
+      --file "$compose_file" \
+      "$@"
+}
+
+require_running_service() {
+  local container_id
+  container_id="$(compose ps --quiet --status running dev)"
+  [[ -n "$container_id" ]] || fail "Compose dev service is not running"
+  [[ "$container_id" != *$'\n'* ]] || fail "Compose dev service resolved to multiple containers"
+}
+
+print_validation() {
+  local head origin checksum permissions
+  head="$(read_checkout_head "$SNAPREQ_SOURCE_PATH")"
+  origin="$(read_checkout_origin "$SNAPREQ_SOURCE_PATH")"
+  checksum="$(sha256sum "$compose_file" | awk '{print $1}')"
+  permissions="$(stat -c '%a %u:%g' -- "$SNAPREQ_SOURCE_PATH")"
+
+  printf 'source=%s\n' "$SNAPREQ_SOURCE_PATH"
+  printf 'project=%s\n' "$SNAPREQ_COMPOSE_PROJECT"
+  printf 'origin=%s\n' "$origin"
+  printf 'head=%s\n' "$head"
+  printf 'source-mode-owner=%s\n' "$permissions"
+  printf 'compose-sha256=%s\n' "$checksum"
+}
+
+run_proof() {
+  require_running_service
+
+  local expected_head expected_origin expected_checksum
+  expected_head="$(read_checkout_head "$SNAPREQ_SOURCE_PATH")"
+  expected_origin="$(read_checkout_origin "$SNAPREQ_SOURCE_PATH")"
+  expected_checksum="$(sha256sum "$compose_file" | awk '{print $1}')"
+
+  compose exec --no-TTY --workdir /workspace dev sh -ceu '
+    expected_head=$1
+    expected_origin=$2
+    expected_checksum=$3
+    test "$(pwd -P)" = /workspace
+    test "$(git rev-parse --show-toplevel)" = /workspace
+    test "$(git rev-parse HEAD)" = "$expected_head"
+    test "$(git remote get-url origin)" = "$expected_origin"
+    actual_checksum=$(sha256sum compose.hermes.yml | awk "{print \$1}")
+    test "$actual_checksum" = "$expected_checksum"
+    test "$(stat -c "%u:%g" /workspace)" = 1000:1000
+    permissions=$(stat -c "%A" /workspace)
+    test "$(printf "%s" "$permissions" | cut -c 9)" != w
+    printf "pwd=%s\n" "$(pwd -P)"
+    printf "root=%s\n" "$(git rev-parse --show-toplevel)"
+    printf "origin=%s\n" "$(git remote get-url origin)"
+    printf "head=%s\n" "$(git rev-parse HEAD)"
+    printf "compose-sha256=%s\n" "$actual_checksum"
+    printf "workspace-mode-owner=%s %s\n" "$(stat -c "%a" /workspace)" "$(stat -c "%u:%g" /workspace)"
+    printf "node=%s\n" "$(node --version)"
+    printf "codex=%s\n" "$(codex --version)"
+  ' sh "$expected_head" "$expected_origin" "$expected_checksum"
+}
+
+initialize_codex() {
+  [[ -n "${SNAPREQ_CODEX_AUTH_VOLUME:-}" ]] || fail "SNAPREQ_CODEX_AUTH_VOLUME is required"
+  validate_auth_volume_name "$SNAPREQ_CODEX_AUTH_VOLUME"
+  case "$SNAPREQ_CODEX_AUTH_VOLUME" in
+    "${SNAPREQ_COMPOSE_PROJECT}_node_modules"|"${SNAPREQ_COMPOSE_PROJECT}_npm_cache"|"${SNAPREQ_COMPOSE_PROJECT}_codex_home")
+      fail "Codex auth source must be separate from task-owned mutable volumes"
+      ;;
+  esac
+
+  local inspected_volume
+  inspected_volume="$(docker volume inspect --format '{{.Name}}' "$SNAPREQ_CODEX_AUTH_VOLUME" 2>/dev/null)" \
+    || fail "SNAPREQ_CODEX_AUTH_VOLUME does not exist in the Hermes Docker daemon"
+  [[ "$inspected_volume" == "$SNAPREQ_CODEX_AUTH_VOLUME" ]] \
+    || fail "Docker resolved an unexpected Codex auth volume"
+
+  compose run \
+    --rm \
+    --no-deps \
+    --no-TTY \
+    --user 1000:1000 \
+    --volume "$SNAPREQ_CODEX_AUTH_VOLUME:/source:ro" \
+    --entrypoint /bin/sh \
+    dev \
+    -ceu '
+      umask 077
+      test -f /source/auth.json
+      test ! -L /source/auth.json
+      test -s /source/auth.json
+      install -m 0600 /source/auth.json /home/node/.codex/auth.json
+      test "$(stat -c "%u:%g %a" /home/node/.codex/auth.json)" = "1000:1000 600"
+    '
+  printf 'Initialized Codex authentication in project %s without exposing its contents.\n' "$SNAPREQ_COMPOSE_PROJECT"
+}
+
+validate_threadwire_args() {
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      --provider|--provider=*|--target|--target=*|--cwd|--cwd=*|--workspace-profile|--workspace-profile=*)
+        fail "Threadwire provider, target, cwd, and workspace profile are managed by hermes-compose"
+        ;;
+    esac
+  done
+}
+
+validate_build_args() {
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      --build-arg|--build-arg=*|--build-context|--build-context=*|--secret|--secret=*|--ssh|--ssh=*)
+        fail "Dockerfile inputs and build credentials are fixed by compose.hermes.yml"
+        ;;
+    esac
+  done
+}
+
+launch_threadwire() {
+  [[ -n "${THREADWIRE_TARGET:-}" ]] || fail "THREADWIRE_TARGET is required"
+  [[ "$THREADWIRE_TARGET" =~ ^telegram:-?[1-9][0-9]*(:[1-9][0-9]*)?$ ]] \
+    || fail "THREADWIRE_TARGET must be telegram:<nonzero-chat-id>[:<positive-thread-id>]"
+  validate_threadwire_args "$@"
+  require_running_service
+
+  local threadwire_candidate="${THREADWIRE_BIN:-threadwire}"
+  local threadwire_executable
+  threadwire_executable="$(command -v -- "$threadwire_candidate" 2>/dev/null)" \
+    || fail "Threadwire is not installed on the outer Hermes host"
+  [[ -x "$threadwire_executable" ]] || fail "Threadwire executable is not executable"
+
+  local adapter="$repo_dir/scripts/threadwire-compose-provider"
+  [[ -x "$adapter" ]] || fail "Threadwire Compose provider adapter is not executable"
+
+  THREADWIRE_CODEX_BIN="$adapter" \
+    SNAPREQ_SOURCE_PATH="$SNAPREQ_SOURCE_PATH" \
+    SNAPREQ_COMPOSE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" \
+    "$threadwire_executable" run \
+      --provider codex \
+      --target "$THREADWIRE_TARGET" \
+      --cwd "$SNAPREQ_SOURCE_PATH" \
+      "$@"
+}
+
+purge_project_resources() {
+  [[ "${SNAPREQ_PURGE_PROJECT:-}" == "$SNAPREQ_COMPOSE_PROJECT" ]] \
+    || fail "set SNAPREQ_PURGE_PROJECT exactly to $SNAPREQ_COMPOSE_PROJECT to purge"
+
+  compose down --remove-orphans
+  [[ -z "$(compose ps --all --quiet)" ]] || fail "project still has containers after down"
+
+  local purpose volume_name volume_project volume_hermes_project volume_purpose references
+  for purpose in node_modules npm_cache codex_home; do
+    volume_name="${SNAPREQ_COMPOSE_PROJECT}_${purpose}"
+    if ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
+      continue
+    fi
+    volume_project="$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$volume_name")"
+    volume_hermes_project="$(docker volume inspect --format '{{index .Labels "io.snapreq.hermes.project"}}' "$volume_name")"
+    volume_purpose="$(docker volume inspect --format '{{index .Labels "io.snapreq.hermes.purpose"}}' "$volume_name")"
+    [[ "$volume_project" == "$SNAPREQ_COMPOSE_PROJECT" \
+      && "$volume_hermes_project" == "$SNAPREQ_COMPOSE_PROJECT" \
+      && "$volume_purpose" == "$purpose" ]] \
+      || fail "refusing to remove ambiguously labeled volume $volume_name"
+    references="$(docker container ls --all --quiet --filter "volume=$volume_name")"
+    [[ -z "$references" ]] || fail "container still references $volume_name"
+    docker volume rm "$volume_name"
+  done
+
+  local network_name="${SNAPREQ_COMPOSE_PROJECT}_default"
+  if docker network inspect "$network_name" >/dev/null 2>&1; then
+    local network_project network_hermes_project network_references
+    network_project="$(docker network inspect --format '{{index .Labels "com.docker.compose.project"}}' "$network_name")"
+    network_hermes_project="$(docker network inspect --format '{{index .Labels "io.snapreq.hermes.project"}}' "$network_name")"
+    network_references="$(docker network inspect --format '{{len .Containers}}' "$network_name")"
+    [[ "$network_project" == "$SNAPREQ_COMPOSE_PROJECT" \
+      && "$network_hermes_project" == "$SNAPREQ_COMPOSE_PROJECT" ]] \
+      || fail "refusing to remove ambiguously labeled network $network_name"
+    [[ "$network_references" == "0" ]] || fail "network $network_name still has live references"
+    docker network rm "$network_name"
+  fi
+
+  local image_name="${SNAPREQ_COMPOSE_PROJECT}-dev"
+  if docker image inspect "$image_name" >/dev/null 2>&1; then
+    [[ "$(docker image inspect --format '{{index .Config.Labels "io.snapreq.hermes.image"}}' "$image_name")" == "dev" \
+      && "$(docker image inspect --format '{{index .Config.Labels "io.snapreq.hermes.project"}}' "$image_name")" == "$SNAPREQ_COMPOSE_PROJECT" ]] \
+      || fail "refusing to remove ambiguously labeled image $image_name"
+    [[ -z "$(docker container ls --all --quiet --filter "ancestor=$image_name")" ]] \
+      || fail "container still references image $image_name"
+    docker image rm "$image_name"
+  fi
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/hermes-compose COMMAND [ARGS]
+
+Commands:
+  validate                 Validate and print source/project/Git/checksum facts
+  config                   Render the checked-in Compose configuration
+  build [BUILD_ARGS]       Build the task-owned development image
+  up                       Start the long-running dev service
+  status                   Show this project's Compose status
+  exec [--no-tty] [CMD...] Execute a command in /workspace (default: bash)
+  proof                    Verify and print in-container source/toolchain facts
+  init-codex               Seed task Codex state from SNAPREQ_CODEX_AUTH_VOLUME
+  threadwire [RUN_ARGS]    Launch host Threadwire through the Compose provider
+  down                     Stop only this project; preserve mutable volumes
+  purge                    Remove confirmed, unreferenced task volumes/network/image
+USAGE
+}
+
+command_name="${1:-}"
+if [[ "$command_name" == "_validate-project-pair" ]]; then
+  [[ $# -eq 3 ]] || fail "_validate-project-pair requires TASK PROJECT"
+  validate_project_pair "$2" "$3"
+  exit 0
+fi
+if [[ "$command_name" == "_validate-checkout-ownership" ]]; then
+  [[ $# -eq 2 ]] || fail "_validate-checkout-ownership requires CHECKOUT"
+  validate_checkout_ownership "$2"
+  exit 0
+fi
+if [[ "$command_name" == "_validate-auth-volume-name" ]]; then
+  [[ $# -eq 2 ]] || fail "_validate-auth-volume-name requires VOLUME"
+  validate_auth_volume_name "$2"
+  exit 0
+fi
+if [[ "$command_name" == "_read-checkout-identity" ]]; then
+  [[ $# -eq 2 ]] || fail "_read-checkout-identity requires CHECKOUT"
+  validate_checkout_ownership "$2"
+  printf 'head=%s\n' "$(read_checkout_head "$2")"
+  printf 'origin=%s\n' "$(read_checkout_origin "$2")"
+  exit 0
+fi
+if [[ "$command_name" == "help" || "$command_name" == "-h" || "$command_name" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+[[ -n "$command_name" ]] || {
+  usage >&2
+  exit 2
+}
+shift
+
+validate_source_and_project
+
+case "$command_name" in
+  validate)
+    [[ $# -eq 0 ]] || fail "validate takes no arguments"
+    print_validation
+    ;;
+  config)
+    [[ $# -eq 0 ]] || fail "config takes no arguments"
+    require_compose
+    compose config
+    ;;
+  build)
+    require_compose
+    validate_build_args "$@"
+    compose build "$@" dev
+    ;;
+  up)
+    [[ $# -eq 0 ]] || fail "up takes no arguments"
+    require_compose
+    compose up --detach --wait dev
+    ;;
+  status)
+    [[ $# -eq 0 ]] || fail "status takes no arguments"
+    require_compose
+    compose ps
+    ;;
+  exec)
+    require_compose
+    require_running_service
+    tty_arguments=()
+    if [[ "${1:-}" == "--no-tty" ]]; then
+      tty_arguments=(--no-TTY)
+      shift
+    fi
+    if [[ $# -eq 0 ]]; then
+      set -- bash
+    fi
+    compose exec "${tty_arguments[@]}" --workdir /workspace dev "$@"
+    ;;
+  provider-exec)
+    [[ "${THREADWIRE_ACTIVE:-}" == "1" ]] || fail "provider-exec is reserved for an active Threadwire child"
+    [[ $# -gt 0 ]] || fail "provider-exec requires a provider command"
+    require_compose
+    require_running_service
+    compose exec --no-TTY --workdir /workspace dev "$@"
+    ;;
+  proof)
+    [[ $# -eq 0 ]] || fail "proof takes no arguments"
+    require_compose
+    run_proof
+    ;;
+  container-id)
+    [[ $# -eq 0 ]] || fail "container-id takes no arguments"
+    require_compose
+    require_running_service
+    compose ps --quiet --status running dev
+    ;;
+  init-codex)
+    [[ $# -eq 0 ]] || fail "init-codex takes no arguments"
+    require_compose
+    initialize_codex
+    ;;
+  threadwire)
+    require_compose
+    launch_threadwire "$@"
+    ;;
+  down)
+    [[ $# -eq 0 ]] || fail "down takes no arguments"
+    require_compose
+    compose down --remove-orphans
+    ;;
+  purge)
+    [[ $# -eq 0 ]] || fail "purge takes no arguments"
+    require_compose
+    purge_project_resources
+    ;;
+  *)
+    usage >&2
+    fail "unknown command: $command_name"
+    ;;
+esac

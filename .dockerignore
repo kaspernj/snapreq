@@ -1,0 +1,16 @@
+.git
+.codex
+.env
+.env.*
+auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.token
+build
+coverage
+node_modules
+tmp

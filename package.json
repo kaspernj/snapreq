@@ -21,6 +21,7 @@
   "scripts": {
     "all-checks": "npm run typecheck && npm run lint && npm run test",
     "build": "rm -rf build && tsc",
+    "hermes:check": "node --test spec/hermes-compose-spec.js",
     "lint": "npm run eslint && npm run typecheck",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",

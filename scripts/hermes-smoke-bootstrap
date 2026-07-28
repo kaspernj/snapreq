@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+fail() {
+  printf 'hermes-smoke-bootstrap: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ "${HERMES_SMOKE_BOOTSTRAP:-}" == "1" ]] || fail "container bootstrap marker is required"
+[[ "$(id -u):$(id -g)" == "1000:1000" ]] || fail "bootstrap must run as uid/gid 1000:1000"
+[[ $# -eq 2 ]] || fail "expected BRANCH PROJECT"
+
+branch_name=$1
+project_name=$2
+task_name="${branch_name#hermes-smoke/}"
+
+[[ "$branch_name" == "hermes-smoke/$task_name" ]] || fail "invalid smoke branch"
+[[ "$task_name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || fail "invalid smoke task"
+[[ "$project_name" == "snapreq-$task_name" ]] || fail "smoke project and branch do not match"
+[[ -d /source/.git && ! -L /source/.git ]] || fail "source must contain its own .git directory"
+[[ -d /destination && ! -L /destination ]] || fail "destination mount is missing"
+[[ "$(stat -c '%u:%g' /source)" == "1000:1000" ]] || fail "source root ownership mismatch"
+[[ "$(stat -c '%u:%g' /source/.git)" == "1000:1000" ]] || fail "source .git ownership mismatch"
+[[ "$(stat -c '%u:%g' /destination)" == "1000:1000" ]] || fail "destination ownership mismatch"
+[[ -z "$(find /destination -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "destination is not empty"
+
+source_permissions="$(stat -c '%A' /source)"
+git_permissions="$(stat -c '%A' /source/.git)"
+destination_permissions="$(stat -c '%A' /destination)"
+[[ "${source_permissions:8:1}" != "w" ]] || fail "source root is world-writable"
+[[ "${git_permissions:8:1}" != "w" ]] || fail "source .git is world-writable"
+[[ "${destination_permissions:8:1}" != "w" ]] || fail "destination is world-writable"
+[[ "$(git -C /source rev-parse --show-toplevel)" == "/source" ]] || fail "source Git root mismatch"
+[[ -z "$(git -C /source status --porcelain)" ]] \
+  || fail "source must be clean so the smoke clones contain the implementation"
+
+source_origin="$(git -C /source remote get-url origin)"
+case "$source_origin" in
+  "https://github.com/kaspernj/snapreq.git"|"https://github.com/kaspernj/snapreq"|"git@github.com:kaspernj/snapreq.git"|"ssh://git@github.com/kaspernj/snapreq.git")
+    ;;
+  *)
+    fail "source origin is not kaspernj/snapreq"
+    ;;
+esac
+base_head="$(git -C /source rev-parse HEAD)"
+
+git clone --no-local --no-checkout /source /destination
+git -C /destination remote set-url origin "$source_origin"
+git -C /destination checkout --quiet -b "$branch_name" "$base_head"
+printf 'stack=%s\n' "$project_name" > /destination/.hermes-smoke-marker
+git -C /destination add .hermes-smoke-marker
+git -C /destination \
+  -c user.name="SnapReq Hermes Smoke" \
+  -c user.email="hermes-smoke@invalid.example" \
+  commit --quiet -m "test: distinguish $project_name"
+
+head_sha="$(git -C /destination rev-parse HEAD)"
+marker_checksum="$(sha256sum /destination/.hermes-smoke-marker | awk '{print $1}')"
+[[ -z "$(git -C /destination status --porcelain)" ]] || fail "bootstrapped checkout is dirty"
+printf 'head=%s marker_sha256=%s base_head=%s origin=%s\n' \
+  "$head_sha" "$marker_checksum" "$base_head" "$source_origin"

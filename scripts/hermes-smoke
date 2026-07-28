@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+fail() {
+  printf 'hermes-smoke: %s\n' "$*" >&2
+  exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source_repo="$(cd -- "$script_dir/.." && pwd -P)"
+source_prefix="/opt/hermes-dind-shared/worktrees/snapreq/"
+validator="$source_repo/scripts/hermes-compose"
+
+[[ "$source_repo" == "$source_prefix"* ]] \
+  || fail "run from an exact Hermes task worktree below $source_prefix"
+[[ "${source_repo#"$source_prefix"}" != */* ]] || fail "smoke source repository is nested below a task worktree"
+[[ -x "$validator" ]] || fail "Hermes lifecycle helper is not executable"
+command -v docker >/dev/null 2>&1 || fail "docker is required on the outer Hermes host"
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
+threadwire_candidate="${THREADWIRE_BIN:-threadwire}"
+command -v -- "$threadwire_candidate" >/dev/null 2>&1 || fail "Threadwire is required on the outer Hermes host"
+[[ -n "${SNAPREQ_CODEX_AUTH_VOLUME:-}" ]] || fail "SNAPREQ_CODEX_AUTH_VOLUME is required"
+[[ -n "${THREADWIRE_TARGET:-}" ]] || fail "THREADWIRE_TARGET is required"
+"$validator" _validate-auth-volume-name "$SNAPREQ_CODEX_AUTH_VOLUME"
+[[ "$(docker volume inspect --format '{{.Name}}' "$SNAPREQ_CODEX_AUTH_VOLUME" 2>/dev/null)" == "$SNAPREQ_CODEX_AUTH_VOLUME" ]] \
+  || fail "SNAPREQ_CODEX_AUTH_VOLUME does not exist in the Hermes Docker daemon"
+
+source_task="${source_repo#"$source_prefix"}"
+source_project="snapreq-$source_task"
+"$validator" _validate-project-pair "$source_task" "$source_project"
+SNAPREQ_SOURCE_PATH="$source_repo" \
+  SNAPREQ_COMPOSE_PROJECT="$source_project" \
+  "$validator" validate >/dev/null
+bootstrap_image="${source_project}-dev"
+[[ "$(docker image inspect --format '{{index .Config.Labels "io.snapreq.hermes.image"}}' "$bootstrap_image" 2>/dev/null)" == "dev" \
+  && "$(docker image inspect --format '{{index .Config.Labels "io.snapreq.hermes.project"}}' "$bootstrap_image" 2>/dev/null)" == "$source_project" ]] \
+  || fail "build the validated source task image before running the smoke"
+
+task_a="${SNAPREQ_SMOKE_TASK_A:-}"
+task_b="${SNAPREQ_SMOKE_TASK_B:-}"
+[[ -n "$task_a" && -n "$task_b" ]] || fail "SNAPREQ_SMOKE_TASK_A and SNAPREQ_SMOKE_TASK_B are required"
+[[ "$task_a" != "$task_b" ]] || fail "smoke task names must be distinct"
+project_a="snapreq-$task_a"
+project_b="snapreq-$task_b"
+"$validator" _validate-project-pair "$task_a" "$project_a"
+"$validator" _validate-project-pair "$task_b" "$project_b"
+
+path_a="$source_prefix$task_a"
+path_b="$source_prefix$task_b"
+branch_a="hermes-smoke/$task_a"
+branch_b="hermes-smoke/$task_b"
+
+[[ ! -e "$path_a" && ! -L "$path_a" ]] || fail "smoke path already exists: $path_a"
+[[ ! -e "$path_b" && ! -L "$path_b" ]] || fail "smoke path already exists: $path_b"
+
+created_a=0
+created_b=0
+stack_a_touched=0
+stack_b_touched=0
+sha_a=""
+sha_b=""
+base_head=""
+base_origin=""
+
+run_helper() {
+  local source_path=$1
+  local project_name=$2
+  shift 2
+  SNAPREQ_SOURCE_PATH="$source_path" \
+    SNAPREQ_COMPOSE_PROJECT="$project_name" \
+    "$source_path/scripts/hermes-compose" "$@"
+}
+
+purge_stack() {
+  local source_path=$1
+  local project_name=$2
+  SNAPREQ_SOURCE_PATH="$source_path" \
+    SNAPREQ_COMPOSE_PROJECT="$project_name" \
+    SNAPREQ_PURGE_PROJECT="$project_name" \
+    "$source_path/scripts/hermes-compose" purge
+}
+
+assert_no_container_path_references() {
+  local source_path=$1
+  local container_id mount_source
+
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    while IFS= read -r mount_source; do
+      [[ "$mount_source" != "$source_path" ]] \
+        || fail "container $container_id still references $source_path"
+    done < <(docker container inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id")
+  done < <(docker container ls --all --quiet)
+}
+
+remove_checkout() {
+  local source_path=$1
+  local branch_name=$2
+  local expected_head=$3
+  local checkout_identity actual_head actual_origin head_reference
+
+  [[ "$source_path" == "$source_prefix"* && "${source_path#"$source_prefix"}" != */* ]] \
+    || fail "refusing to remove non-smoke checkout path"
+  assert_no_container_path_references "$source_path"
+  [[ -d "$source_path/.git" && ! -L "$source_path/.git" ]] \
+    || fail "refusing to remove a checkout without its own .git directory"
+  checkout_identity="$("$validator" _read-checkout-identity "$source_path")" \
+    || fail "refusing to remove checkout with invalid Git metadata"
+  actual_head="$(awk -F= '$1 == "head" {print $2}' <<< "$checkout_identity")"
+  actual_origin="$(awk -F= '$1 == "origin" {sub(/^[^=]*=/, ""); print}' <<< "$checkout_identity")"
+  IFS= read -r head_reference < "$source_path/.git/HEAD" \
+    || fail "refusing to remove checkout with unreadable HEAD"
+  head_reference="${head_reference%$'\r'}"
+  [[ "$head_reference" == "ref: refs/heads/$branch_name" ]] \
+    || fail "refusing to remove checkout on an unexpected branch"
+  [[ "$actual_head" == "$expected_head" ]] \
+    || fail "refusing to remove checkout at an unexpected revision"
+  [[ "$actual_origin" == "$base_origin" ]] \
+    || fail "refusing to remove checkout with an unexpected origin"
+  rm -rf --one-file-system -- "$source_path"
+}
+
+initialize_destination_ownership() {
+  local destination_path=$1
+
+  [[ "$destination_path" == "$source_prefix"* && "${destination_path#"$source_prefix"}" != */* ]] \
+    || fail "refusing to initialize non-smoke destination ownership"
+  [[ -d "$destination_path" && ! -L "$destination_path" ]] \
+    || fail "refusing to initialize an invalid destination"
+
+  docker run \
+    --rm \
+    --user 0:0 \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount "type=bind,src=$destination_path,dst=/destination" \
+    "$bootstrap_image" \
+    /bin/sh -ceu '
+      test -d /destination
+      test -z "$(find /destination -mindepth 1 -maxdepth 1 -print -quit)"
+      chown 1000:1000 -- /destination
+      chmod 0755 -- /destination
+    '
+}
+
+create_empty_destination() {
+  local destination_path=$1
+  local -n created_result=$2
+
+  [[ "$destination_path" == "$source_prefix"* && "${destination_path#"$source_prefix"}" != */* ]] \
+    || fail "refusing to create non-smoke destination path"
+  mkdir --mode=0755 -- "$destination_path"
+  created_result=1
+  [[ "$(realpath -e -- "$destination_path")" == "$destination_path" ]] \
+    || fail "destination path must be canonical"
+  [[ -z "$(find "$destination_path" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+    || fail "destination must be empty before ownership initialization"
+  initialize_destination_ownership "$destination_path"
+  [[ "$(stat -c '%u:%g' -- "$destination_path")" == "1000:1000" ]] \
+    || fail "destination ownership helper did not set 1000:1000"
+  [[ "$(stat -c '%a' -- "$destination_path")" == "755" ]] \
+    || fail "destination ownership helper did not set mode 0755"
+  [[ -z "$(find "$destination_path" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+    || fail "destination must be empty"
+}
+
+remove_empty_destination() {
+  local destination_path=$1
+
+  [[ "$destination_path" == "$source_prefix"* && "${destination_path#"$source_prefix"}" != */* ]] \
+    || fail "refusing to remove non-smoke destination path"
+  assert_no_container_path_references "$destination_path"
+  [[ -d "$destination_path" && ! -L "$destination_path" ]] \
+    || fail "refusing to remove an invalid destination"
+  [[ -z "$(find "$destination_path" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+    || fail "refusing to remove a nonempty incomplete destination"
+  rmdir -- "$destination_path"
+}
+
+bootstrap_checkout() {
+  local destination_path=$1
+  local branch_name=$2
+  local project_name=$3
+
+  docker run \
+    --rm \
+    --user 1000:1000 \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --tmpfs /tmp:rw,nosuid,nodev,mode=0700,uid=1000,gid=1000 \
+    --env HOME=/tmp \
+    --env GIT_CONFIG_NOSYSTEM=1 \
+    --env GIT_OPTIONAL_LOCKS=0 \
+    --env HERMES_SMOKE_BOOTSTRAP=1 \
+    --mount "type=bind,src=$source_repo,dst=/source,readonly" \
+    --mount "type=bind,src=$destination_path,dst=/destination" \
+    "$bootstrap_image" \
+    /source/scripts/hermes-smoke-bootstrap "$branch_name" "$project_name"
+}
+
+parse_bootstrap_result() {
+  local result=$1
+  local -n head_result=$2
+  local -n marker_result=$3
+  local -n base_head_result=$4
+  local -n origin_result=$5
+
+  [[ "$result" =~ ^head=([0-9a-f]{40})[[:space:]]marker_sha256=([0-9a-f]{64})[[:space:]]base_head=([0-9a-f]{40})[[:space:]]origin=([^[:space:]]+)$ ]] \
+    || fail "bootstrap returned malformed identity evidence"
+  head_result="${BASH_REMATCH[1]}"
+  marker_result="${BASH_REMATCH[2]}"
+  base_head_result="${BASH_REMATCH[3]}"
+  origin_result="${BASH_REMATCH[4]}"
+}
+
+emergency_cleanup() {
+  local exit_code=$?
+  trap - EXIT
+  set +e
+
+  if (( stack_a_touched == 1 )) && [[ -x "$path_a/scripts/hermes-compose" ]]; then
+    if run_helper "$path_a" "$project_a" down && purge_stack "$path_a" "$project_a"; then
+      stack_a_touched=0
+    else
+      printf 'hermes-smoke: preserving %s because exact Compose cleanup failed\n' "$path_a" >&2
+    fi
+  fi
+  if (( stack_b_touched == 1 )) && [[ -x "$path_b/scripts/hermes-compose" ]]; then
+    if run_helper "$path_b" "$project_b" down && purge_stack "$path_b" "$project_b"; then
+      stack_b_touched=0
+    else
+      printf 'hermes-smoke: preserving %s because exact Compose cleanup failed\n' "$path_b" >&2
+    fi
+  fi
+  if (( created_a == 1 && stack_a_touched == 0 )) && [[ -d "$path_a" ]]; then
+    if [[ -n "$sha_a" ]]; then
+      remove_checkout "$path_a" "$branch_a" "$sha_a" || true
+    else
+      remove_empty_destination "$path_a" || true
+    fi
+  fi
+  if (( created_b == 1 && stack_b_touched == 0 )) && [[ -d "$path_b" ]]; then
+    if [[ -n "$sha_b" ]]; then
+      remove_checkout "$path_b" "$branch_b" "$sha_b" || true
+    else
+      remove_empty_destination "$path_b" || true
+    fi
+  fi
+  exit "$exit_code"
+}
+trap emergency_cleanup EXIT
+
+create_empty_destination "$path_a" created_a
+bootstrap_result_a="$(bootstrap_checkout "$path_a" "$branch_a" "$project_a")"
+parse_bootstrap_result "$bootstrap_result_a" sha_a marker_checksum_a base_head base_origin
+
+create_empty_destination "$path_b" created_b
+bootstrap_result_b="$(bootstrap_checkout "$path_b" "$branch_b" "$project_b")"
+base_head_b=""
+base_origin_b=""
+parse_bootstrap_result "$bootstrap_result_b" sha_b marker_checksum_b base_head_b base_origin_b
+
+[[ "$sha_a" != "$sha_b" ]] || fail "smoke commits are not distinguishable"
+[[ "$marker_checksum_a" != "$marker_checksum_b" ]] || fail "smoke marker checksums are not distinguishable"
+[[ "$base_head_b" == "$base_head" && "$base_origin_b" == "$base_origin" ]] \
+  || fail "bootstrap containers did not use the same source identity"
+printf 'stack-a branch=%s head=%s marker-sha256=%s\n' "$branch_a" "$sha_a" "$marker_checksum_a"
+printf 'stack-b branch=%s head=%s marker-sha256=%s\n' "$branch_b" "$sha_b" "$marker_checksum_b"
+
+run_helper "$path_a" "$project_a" validate
+run_helper "$path_b" "$project_b" validate
+run_helper "$path_a" "$project_a" config >/dev/null
+run_helper "$path_b" "$project_b" config >/dev/null
+
+stack_a_touched=1
+run_helper "$path_a" "$project_a" build --pull --no-cache
+stack_b_touched=1
+run_helper "$path_b" "$project_b" build --pull --no-cache
+run_helper "$path_a" "$project_a" init-codex
+run_helper "$path_b" "$project_b" init-codex
+run_helper "$path_a" "$project_a" up
+run_helper "$path_b" "$project_b" up
+
+run_helper "$path_a" "$project_a" exec --no-tty npm ci
+run_helper "$path_b" "$project_b" exec --no-tty npm ci
+run_helper "$path_a" "$project_a" exec --no-tty npm run all-checks
+run_helper "$path_b" "$project_b" exec --no-tty npm run all-checks
+
+assert_stack() {
+  local source_path=$1
+  local project_name=$2
+  local expected_head=$3
+  local expected_marker_checksum=$4
+
+  run_helper "$source_path" "$project_name" proof
+  run_helper "$source_path" "$project_name" exec --no-tty sh -ceu '
+    expected_project=$1
+    expected_head=$2
+    expected_marker_checksum=$3
+    test "$(pwd -P)" = /workspace
+    test "$(git rev-parse --show-toplevel)" = /workspace
+    test "$(git rev-parse HEAD)" = "$expected_head"
+    test "$HERMES_COMPOSE_PROJECT" = "$expected_project"
+    test "$(sha256sum .hermes-smoke-marker | awk "{print \$1}")" = "$expected_marker_checksum"
+    test -d /workspace/node_modules
+    test -z "$(git status --porcelain)"
+  ' sh "$project_name" "$expected_head" "$expected_marker_checksum"
+
+  local container_id project_label service_label dependency_volume networks
+  container_id="$(run_helper "$source_path" "$project_name" container-id)"
+  project_label="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container_id")"
+  service_label="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container_id")"
+  dependency_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace/node_modules"}}{{.Name}}{{end}}{{end}}' "$container_id")"
+  networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' "$container_id")"
+
+  [[ "$project_label" == "$project_name" ]] || fail "container project label mismatch for $project_name"
+  [[ "$service_label" == "dev" ]] || fail "container service label mismatch for $project_name"
+  [[ "$dependency_volume" == "${project_name}_node_modules" ]] \
+    || fail "dependency volume mismatch for $project_name"
+  [[ "$networks" == "${project_name}_default" ]] || fail "network identity mismatch for $project_name"
+  [[ "$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$dependency_volume")" == "$project_name" ]] \
+    || fail "dependency volume project label mismatch for $project_name"
+  [[ "$(docker network inspect --format '{{index .Labels "com.docker.compose.project"}}' "${project_name}_default")" == "$project_name" ]] \
+    || fail "network project label mismatch for $project_name"
+
+  printf 'identity project=%s container=%s network=%s dependency-volume=%s head=%s marker-sha256=%s\n' \
+    "$project_name" "$container_id" "$networks" "$dependency_volume" "$expected_head" "$expected_marker_checksum"
+}
+
+assert_stack "$path_a" "$project_a" "$sha_a" "$marker_checksum_a"
+assert_stack "$path_b" "$project_b" "$sha_b" "$marker_checksum_b"
+container_b_before="$(run_helper "$path_b" "$project_b" container-id)"
+
+probe_prompt="Read-only acceptance probe. Do not edit files. Run only: pwd; git rev-parse HEAD; node -e 'const p=require(\"./package.json\"); console.log(p.name, p.version)'. Report those results."
+run_helper "$path_a" "$project_a" threadwire --prompt "$probe_prompt"
+run_helper "$path_b" "$project_b" threadwire --prompt "$probe_prompt"
+assert_stack "$path_a" "$project_a" "$sha_a" "$marker_checksum_a"
+assert_stack "$path_b" "$project_b" "$sha_b" "$marker_checksum_b"
+
+run_helper "$path_a" "$project_a" down
+[[ -z "$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$project_a")" ]] \
+  || fail "stack A still has containers after down"
+if docker network inspect "${project_a}_default" >/dev/null 2>&1; then
+  fail "stack A network remains after down"
+fi
+
+container_b_after="$(run_helper "$path_b" "$project_b" container-id)"
+[[ "$container_b_after" == "$container_b_before" ]] || fail "stack B container changed when stack A stopped"
+assert_stack "$path_b" "$project_b" "$sha_b" "$marker_checksum_b"
+printf 'stack-b-survived stack-a teardown container=%s head=%s marker-sha256=%s\n' \
+  "$container_b_after" "$sha_b" "$marker_checksum_b"
+
+run_helper "$path_b" "$project_b" down
+purge_stack "$path_a" "$project_a"
+stack_a_touched=0
+purge_stack "$path_b" "$project_b"
+stack_b_touched=0
+
+for project_name in "$project_a" "$project_b"; do
+  [[ -z "$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$project_name")" ]] \
+    || fail "containers remain for $project_name after purge"
+  for resource_name in \
+    "${project_name}_node_modules" \
+    "${project_name}_npm_cache" \
+    "${project_name}_codex_home"; do
+    if docker volume inspect "$resource_name" >/dev/null 2>&1; then
+      fail "volume remains after exact purge: $resource_name"
+    fi
+  done
+  if docker network inspect "${project_name}_default" >/dev/null 2>&1; then
+    fail "network remains after exact purge: ${project_name}_default"
+  fi
+  if docker image inspect "${project_name}-dev" >/dev/null 2>&1; then
+    fail "image remains after exact purge: ${project_name}-dev"
+  fi
+done
+
+remove_checkout "$path_a" "$branch_a" "$sha_a"
+created_a=0
+remove_checkout "$path_b" "$branch_b" "$sha_b"
+created_b=0
+
+trap - EXIT
+printf 'Hermes two-stack smoke passed and removed only %s and %s resources.\n' "$project_a" "$project_b"
