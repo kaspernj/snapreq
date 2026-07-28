@@ -103,6 +103,10 @@ remove_checkout() {
 
   [[ "$source_path" == "$source_prefix"* && "${source_path#"$source_prefix"}" != */* ]] \
     || fail "refusing to remove non-smoke checkout path"
+  [[ -d "$source_path" && ! -L "$source_path" ]] \
+    || fail "refusing to remove an invalid checkout path"
+  [[ "$(realpath -e -- "$source_path")" == "$source_path" ]] \
+    || fail "refusing to remove a non-canonical checkout path"
   assert_no_container_path_references "$source_path"
   [[ -d "$source_path/.git" && ! -L "$source_path/.git" ]] \
     || fail "refusing to remove a checkout without its own .git directory"
@@ -119,7 +123,20 @@ remove_checkout() {
     || fail "refusing to remove checkout at an unexpected revision"
   [[ "$actual_origin" == "$base_origin" ]] \
     || fail "refusing to remove checkout with an unexpected origin"
-  rm -rf --one-file-system -- "$source_path"
+  docker run \
+    --rm \
+    --user 1000:1000 \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --mount "type=bind,src=$source_path,dst=/destination" \
+    "$bootstrap_image" \
+    /bin/sh -ceu '
+      find /destination -xdev -mindepth 1 -delete
+      test -z "$(find /destination -mindepth 1 -maxdepth 1 -print -quit)"
+    '
+  rmdir -- "$source_path"
 }
 
 initialize_destination_ownership() {
