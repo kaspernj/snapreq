@@ -28,7 +28,7 @@
     "release:patch": "release-patch",
     "test": "npm run build && node --test \"spec/**/*-spec.js\"",
     "typecheck": "tsc --noEmit",
-    "eslint": "eslint src spec scripts"
+    "eslint": "eslint src spec"
   },
   "keywords": [
     "http",
@@ -46,6 +46,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@kaspernj/hermes-compose": "0.0.0",
     "@types/node": "^26.0.1",
     "@types/ws": "^8.18.1",
     "eslint": "^10.3.0",

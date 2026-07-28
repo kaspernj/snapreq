@@ -173,7 +173,10 @@ The repository includes a task-isolated Node 24 development environment for
 Hermes/Threadwire work. It mounts one exact worktree into `/workspace`; the
 dependency, npm-cache, and Codex state volumes are scoped by the required
 Compose project name. There are no support services, host ports, or fixed
-container names.
+container names. The development-only `@kaspernj/hermes-compose` package owns
+the lifecycle, provider, process and signal handling, bootstrap, proof, smoke
+acceptance, and exact cleanup. SnapReq owns only `hermes.config.js` and its
+checked-in Compose/Dockerfile wiring.
 
 From the outer Hermes Docker host, allocate a self-contained Git checkout
 (with its own `.git` directory) directly below
@@ -181,16 +184,16 @@ From the outer Hermes Docker host, allocate a self-contained Git checkout
 the Compose suffix:
 
 ```sh
-export SNAPREQ_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/10575
-export SNAPREQ_COMPOSE_PROJECT=snapreq-10575
+export HERMES_SOURCE_PATH=/opt/hermes-dind-shared/worktrees/snapreq/10575
+export HERMES_COMPOSE_PROJECT=snapreq-10575
 
-scripts/hermes-compose.js validate
-scripts/hermes-compose.js config
-scripts/hermes-compose.js build --pull
-scripts/hermes-compose.js up
-scripts/hermes-compose.js exec npm ci
-scripts/hermes-compose.js proof
-scripts/hermes-compose.js down
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose validate
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose config
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose build --pull
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose up
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose exec npm ci
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose proof
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose down
 ```
 
 Codex authentication is initialized into the task-owned volume from one
@@ -199,22 +202,28 @@ volume must contain `/auth.json`; it is mounted read-only only for the one-off
 initializer and never attached to the long-running service:
 
 ```sh
-export SNAPREQ_CODEX_AUTH_VOLUME=<existing-auth-volume>
-scripts/hermes-compose.js init-codex
+export HERMES_CODEX_AUTH_VOLUME=<existing-auth-volume>
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose init-codex
 ```
 
-Threadwire remains on the outer host. The lifecycle wrapper launches it with
-the checked-in provider adapter, which runs Codex in the `dev` service at
-`/workspace`:
+Threadwire remains on the outer host. The package launches it through its
+provider, which runs Codex in the `dev` service at `/workspace`:
 
 ```sh
 export THREADWIRE_TARGET=telegram:-1001234567890:42
-scripts/hermes-compose.js threadwire --prompt 'Inspect the project.'
+npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose threadwire --prompt 'Inspect the project.'
 ```
 
-Use `scripts/hermes-compose.js down` for ordinary teardown; it preserves task
-state. Volume/image deletion requires the separate, exact confirmation
-`SNAPREQ_PURGE_PROJECT="$SNAPREQ_COMPOSE_PROJECT" scripts/hermes-compose.js purge`.
+Use the pinned `npm exec` `down` command above for ordinary teardown; it
+preserves task state. Volume/image deletion requires the separate, exact
+confirmation:
+
+```sh
+HERMES_PURGE_PROJECT="$HERMES_COMPOSE_PROJECT" npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose purge
+```
+
+The two-stack acceptance entry point is
+`npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose smoke`.
 See [AGENTS.md](AGENTS.md) for the authoritative boundary, parallel-allocation,
 verification, smoke-test, and non-Hermes workflow rules.
 

@@ -1,0 +1,1 @@
+Migrate the task-isolated Hermes development wiring to the released `@kaspernj/hermes-compose` package while keeping SnapReq's repository-specific configuration, Compose isolation, proof inputs, and Threadwire boundary declarative.

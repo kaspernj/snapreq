@@ -1,28 +1,115 @@
 FROM node:24.18.0-bookworm
 
-ARG CODEX_VERSION=0.144.5
-ARG HERMES_PROJECT
+ARG OPENCODE_VERSION=1.18.8
+ARG CODEX_VERSION=0.145.0
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG KIMI_CODE_VERSION=0.29.2
+ARG THREADWIRE_VERSION=0.1.9
+ARG PACKAGE_VERSION=0.0.0
+ARG PROJECT_NAME
 
-LABEL io.snapreq.hermes.image="dev" \
-  io.snapreq.hermes.project="${HERMES_PROJECT}"
+LABEL io.kaspernj.hermes-compose.image="dev" \
+  io.kaspernj.hermes-compose.project="${PROJECT_NAME}"
 
-RUN test -n "$HERMES_PROJECT"
+RUN test -n "$PROJECT_NAME"
 
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
-    build-essential \
+    bash \
     ca-certificates \
-    gh \
+    curl \
+    wget \
     git \
     git-lfs \
-    jq \
+    gh \
     openssh-client \
-    pkg-config \
-    python3 \
+    gnupg \
+    jq \
+    ripgrep \
+    fd-find \
+    fzf \
+    less \
+    file \
+    tree \
+    bat \
+    nano \
+    vim-tiny \
+    unzip \
+    zip \
+    xz-utils \
+    bzip2 \
+    tar \
+    gzip \
+    rsync \
+    patch \
+    diffutils \
+    gawk \
+    findutils \
+    coreutils \
+    procps \
+    psmisc \
+    lsof \
+    iproute2 \
+    iputils-ping \
+    dnsutils \
+    netcat-openbsd \
+    socat \
+    util-linux \
     tini \
+    python3 \
+    python3-venv \
+    python3-pip \
+    sqlite3 \
+    shellcheck \
+    tmux \
+    zsh \
+    man-db \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+  && ln --symbolic /usr/bin/fdfind /usr/local/bin/fd \
+  && ln --symbolic /usr/bin/batcat /usr/local/bin/bat \
+  && test /usr/local/bin/fd -ef /usr/bin/fdfind \
+  && test /usr/local/bin/bat -ef /usr/bin/batcat \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
+RUN npm install --global \
+    --strict-allow-scripts \
+    --allow-scripts "opencode-ai@${OPENCODE_VERSION}" \
+    --allow-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    --allow-scripts "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
+    --allow-scripts "node-pty@1.1.0" \
+    "opencode-ai@${OPENCODE_VERSION}" \
+    "@openai/codex@${CODEX_VERSION}" \
+    "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
+    "threadwire@${THREADWIRE_VERSION}" \
+    "@kaspernj/hermes-compose@${PACKAGE_VERSION}" \
+  && npm list --global --depth=0 \
+    "opencode-ai@${OPENCODE_VERSION}" \
+    "@openai/codex@${CODEX_VERSION}" \
+    "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
+    "threadwire@${THREADWIRE_VERSION}" \
+    "@kaspernj/hermes-compose@${PACKAGE_VERSION}" \
+  && opencode --version \
+  && codex --version \
+  && claude --version \
+  && kimi --version \
+  && threadwire_output="$(mktemp)" \
+  && if threadwire >"$threadwire_output" 2>&1; then \
+    threadwire_status=0; \
+  else \
+    threadwire_status=$?; \
+  fi \
+  && if [ "$threadwire_status" -ne 2 ] || \
+    ! grep -F -q "Usage: threadwire run --provider" "$threadwire_output"; then \
+    cat "$threadwire_output" >&2; \
+    rm -f "$threadwire_output"; \
+    exit 1; \
+  fi \
+  && rm -f "$threadwire_output" \
+  && hermes-compose --help \
   && npm cache clean --force
 
 RUN install -d -o 1000 -g 1000 -m 0755 \
