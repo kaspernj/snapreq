@@ -6,7 +6,7 @@ import {WebSocketServer} from "ws"
  * Starts a minimal WebSocket server implementing just enough of the protocol
  * the client speaks (session establishment, request/response, channel and
  * connection round-trips) to exercise `SnapReqWebSocketClient` end to end.
- * @returns {Promise<{url: string, receivedMessages: Array<Record<string, any> & {requestUrl?: string}>, releaseSession: (id: string) => void, close: () => Promise<void>}>} - Server handle.
+ * @returns {Promise<{url: string, receivedMessages: Array<Record<string, any> & {requestUrl?: string}>, releaseSession: (id: string) => void, releaseSessionGone: (id: string) => void, waitForSessionResume: (id: string) => Promise<void>, close: () => Promise<void>}>} - Server handle.
  */
 export async function startTestWebSocketServer() {
   const server = new WebSocketServer({host: "127.0.0.1", port: 0})
@@ -14,8 +14,15 @@ export async function startTestWebSocketServer() {
   const receivedMessages = []
   /** @type {Map<string, () => void>} */
   const pendingSessions = new Map()
+  /** @type {Map<string, () => void>} */
+  const pendingSessionGoneResponses = new Map()
+  /** @type {Map<string, () => void>} */
+  const sessionResumeWaiters = new Map()
+  let sessionSequence = 0
 
   server.on("connection", (socket, request) => {
+    sessionSequence += 1
+    const sessionId = `session-${sessionSequence}`
     /** @param {Record<string, any>} message - Outgoing message. */
     const send = (message) => {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message))
@@ -23,9 +30,9 @@ export async function startTestWebSocketServer() {
 
     const manualSessionId = new URL(request.url || "/", "ws://localhost").searchParams.get("manual-session")
     if (manualSessionId) {
-      pendingSessions.set(manualSessionId, () => send({type: "session-established", sessionId: "session-1"}))
+      pendingSessions.set(manualSessionId, () => send({type: "session-established", sessionId}))
     } else if (!request.url?.includes("no-session")) {
-      const establishSession = () => send({type: "session-established", sessionId: "session-1"})
+      const establishSession = () => send({type: "session-established", sessionId})
       if (request.url?.includes("delay-session")) setTimeout(establishSession, 50)
       else establishSession()
     }
@@ -64,7 +71,18 @@ export async function startTestWebSocketServer() {
         if (message.connectionType === "DelayedConnection") setTimeout(acknowledge, 50)
         else acknowledge()
       } else if (message.type === "session-resume") {
-        send({type: "session-resumed", sessionId: message.sessionId})
+        if (request.url?.includes("session-gone-on-resume")) {
+          const manualSessionGoneId = new URL(request.url || "/", "ws://localhost").searchParams.get("manual-session-gone")
+          if (manualSessionGoneId) {
+            pendingSessionGoneResponses.set(manualSessionGoneId, () => send({type: "session-gone"}))
+            sessionResumeWaiters.get(manualSessionGoneId)?.()
+            sessionResumeWaiters.delete(manualSessionGoneId)
+          } else {
+            send({type: "session-gone"})
+          }
+        } else {
+          send({type: "session-resumed", sessionId: message.sessionId})
+        }
       }
     })
   })
@@ -84,6 +102,16 @@ export async function startTestWebSocketServer() {
       pendingSessions.delete(id)
       establishSession()
     },
+    releaseSessionGone: (id) => {
+      const sendSessionGone = pendingSessionGoneResponses.get(id)
+      if (!sendSessionGone) throw new Error(`No pending session-gone response ${id}`)
+      pendingSessionGoneResponses.delete(id)
+      sendSessionGone()
+    },
+    waitForSessionResume: (id) => new Promise((resolve) => {
+      if (sessionResumeWaiters.has(id)) throw new Error(`Session-resume waiter already exists ${id}`)
+      sessionResumeWaiters.set(id, resolve)
+    }),
     close: () => new Promise((resolve) => {
       for (const client of server.clients) client.terminate()
       server.close(() => resolve())

@@ -409,6 +409,56 @@ describe("SnapReqWebSocketClient", () => {
     await client.close()
   })
 
+  it("re-establishes live handles exactly once on the fresh session when resume reports session gone", async () => {
+    const resumeId = "live-handles"
+    const client = new SnapReqWebSocketClient({
+      autoReconnect: true,
+      reconnectDelays: [1],
+      url: `${server.url}?session-gone-on-resume=1&manual-session-gone=${resumeId}`
+    })
+
+    await client.connect()
+    const initialSessionId = client._sessionId
+    let connectionOpenCount = 0
+    const connection = client.openConnection("EchoConnection", {
+      onConnect: () => { connectionOpenCount += 1 }
+    })
+
+    await connection.ready
+    const resumeReceived = server.waitForSessionResume(resumeId)
+    await client.dropConnection()
+    await resumeReceived
+
+    const pendingConnection = client.openConnection("PendingConnection")
+    const subscription = client.subscribeChannel("TickChannel")
+    const pendingConnectionReady = pendingConnection.ready
+    const subscriptionReady = subscription.ready
+    server.releaseSessionGone(resumeId)
+
+    try {
+      await pendingConnectionReady
+      await subscriptionReady
+
+      const pendingConnectionOpenMessages = server.receivedMessages.filter((message) => (
+        message.type === "connection-open" && message.connectionId === pendingConnection.connectionId
+      ))
+
+      assert.equal(connectionOpenCount, 2)
+      assert.equal(connection.isConnected(), true)
+      assert.equal(pendingConnectionOpenMessages.length, 1)
+      assert.equal(pendingConnection.isConnected(), true)
+      assert.equal(subscription.isSubscribed(), true)
+      assert.equal(subscription.isClosed(), false)
+      assert.notEqual(client._sessionId, initialSessionId)
+      assert.match(client._sessionId ?? "", /^session-\d+$/)
+    } finally {
+      connection.close()
+      pendingConnection.close()
+      subscription.close()
+      await client.close()
+    }
+  })
+
   it("keeps shared legacy subscription readiness alive when one callback times out", async () => {
     const client = new SnapReqWebSocketClient({url: server.url, autoReconnect: false})
     /** @type {any[]} */
