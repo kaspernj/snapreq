@@ -165,12 +165,7 @@ export default class SnapReqWebSocketClient {
     })
 
     this._connections.set(connectionId, connection)
-    this._sendMessage({
-      type: "connection-open",
-      connectionId,
-      connectionType,
-      params: options.params || {}
-    })
+    this._sendConnectionOpen(connection)
 
     return connection
   }
@@ -182,6 +177,34 @@ export default class SnapReqWebSocketClient {
    */
   _removeConnection(connectionId) {
     this._connections.delete(connectionId)
+  }
+
+  /**
+   * @param {SnapReqWebSocketConnection} connection - The connection to open.
+   * @returns {void}
+   */
+  _sendConnectionOpen(connection) {
+    if (!this.isOpen() || !this.isSessionReady() || !connection._needsOpen()) return
+
+    try {
+      this._sendMessage({
+        type: "connection-open",
+        connectionId: connection.connectionId,
+        connectionType: connection.connectionType,
+        params: connection.params
+      })
+      connection._markOpenSent()
+    } catch (error) {
+      if (!this.isOpen()) throw error
+
+      this._connections.delete(connection.connectionId)
+      connection._handleClosed(`send_failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** @returns {void} */
+  _sendPendingConnections() {
+    for (const connection of this._connections.values()) this._sendConnectionOpen(connection)
   }
 
   /**
@@ -819,6 +842,7 @@ export default class SnapReqWebSocketClient {
         }
 
         this._markSessionReady()
+        this._sendPendingConnections()
         this._sendPendingChannelSubscriptions()
       }
     } else if (type === "session-resumed") {
@@ -827,6 +851,7 @@ export default class SnapReqWebSocketClient {
       this._sessionId = message.sessionId
       this._persistSessionId(message.sessionId)
       this._markSessionReady()
+      this._sendPendingConnections()
       this._sendPendingChannelSubscriptions()
       // Fire onResume on every live handle so user code knows the session came
       // back with state intact.
@@ -834,22 +859,17 @@ export default class SnapReqWebSocketClient {
       for (const subscription of this._channelSubscriptions.values()) subscription._handleResumed()
     } else if (type === "session-gone") {
       this._awaitingResume = false
-      this._sessionId = null
+      this._sessionId = this._pendingSessionId
       this._pendingSessionId = null
-      this._clearPersistedSessionId()
+      if (this._sessionId) this._persistSessionId(this._sessionId)
+      else this._clearPersistedSessionId()
 
-      // Tear down every live handle — their server-side counterparts are gone.
-      const connections = [...this._connections.values()]
-
-      this._connections.clear()
-      for (const connection of connections) connection._handleClosed("session_gone")
-
-      const subs = [...this._channelSubscriptions.values()]
-
-      this._channelSubscriptions.clear()
-      for (const subscription of subs) subscription._handleClosed("session_gone")
+      for (const connection of this._connections.values()) connection._handleSessionGone()
+      for (const subscription of this._channelSubscriptions.values()) subscription._handleSessionGone()
 
       this._markSessionReady()
+      this._sendPendingConnections()
+      this._sendPendingChannelSubscriptions()
     } else if (type === "error" && message.id) {
       const pending = this.pendingRequests.get(message.id)
 

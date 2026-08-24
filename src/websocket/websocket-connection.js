@@ -34,6 +34,7 @@ export default class SnapReqWebSocketConnection {
     this._onResume = onResume
     this._onClose = onClose
     this._connected = false
+    this._openSent = false
     this._closed = false
 
     /** @type {Promise<void>} - Resolves once the server sends `connection-opened`. */
@@ -91,8 +92,29 @@ export default class SnapReqWebSocketConnection {
    * @returns {void}
    */
   _handleResumed() {
-    if (this._closed) return
+    if (this._closed || !this._connected) return
     this._onResume?.()
+  }
+
+  /**
+   * Called after resume reports that the server no longer owns this connection.
+   * Keeps the client handle alive so it can be opened again on the fresh session.
+   * @returns {void}
+   */
+  _handleSessionGone() {
+    if (this._closed) return
+    this._connected = false
+    this._openSent = false
+  }
+
+  /** @returns {void} */
+  _markOpenSent() {
+    this._openSent = true
+  }
+
+  /** @returns {boolean} - Whether this connection still needs an open message. */
+  _needsOpen() {
+    return !this._closed && !this._openSent
   }
 
   /**

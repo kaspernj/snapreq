@@ -128,6 +128,16 @@ export default class SnapReqWebSocketChannel {
     this._onResume?.()
   }
 
+  /** @returns {void} */
+  _handleSessionGone() {
+    if (this._closed) return
+
+    this._subscribed = false
+    this._subscribeSent = false
+    this._resumeReadyOnResume = false
+    this._markNotReady()
+  }
+
   /**
    * @param {string} reason - Why the subscription closed.
    * @returns {void}
