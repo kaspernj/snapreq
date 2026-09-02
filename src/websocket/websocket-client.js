@@ -127,6 +127,9 @@ export default class SnapReqWebSocketClient {
 
     /** @type {WeakSet<object>} - Sockets whose terminal lifecycle has already been processed. */
     this._closedSockets = new WeakSet()
+
+    /** @type {WeakSet<object>} - Sockets closed through the client's explicit shutdown API. */
+    this._clientClosingSockets = new WeakSet()
   }
 
   /** @returns {boolean} - Whether the socket is open. */
@@ -520,9 +523,11 @@ export default class SnapReqWebSocketClient {
     this._teardownNetworkMonitorSubscription()
     this._stopSocketKeepalive()
 
-    if (!this.socket) return
+    const socket = this.socket
 
-    if (this.socket.readyState === this.socket.CLOSED) {
+    if (!socket) return
+
+    if (socket.readyState === socket.CLOSED) {
       this.socket = undefined
       this.connectPromise = undefined
       this._resetSessionReadyState()
@@ -530,8 +535,9 @@ export default class SnapReqWebSocketClient {
     }
 
     await new Promise((resolve) => {
-      this.socket?.addEventListener("close", () => resolve(undefined))
-      this.socket?.close()
+      this._clientClosingSockets.add(socket)
+      socket.addEventListener("close", () => resolve(undefined))
+      socket.close()
     })
 
     this.socket = undefined
@@ -968,6 +974,10 @@ export default class SnapReqWebSocketClient {
     if (this._closedSockets.has(socket)) return
     this._closedSockets.add(socket)
 
+    const handleCloseReason = this._clientClosingSockets.has(socket) ? "client_close" : "session_destroyed"
+
+    this._clientClosingSockets.delete(socket)
+
     this._stopSocketKeepalive()
     this.disconnectedSince ||= Date.now()
     this._resetSessionReadyState(error)
@@ -992,14 +1002,14 @@ export default class SnapReqWebSocketClient {
 
       this._connections.clear()
       for (const connection of connections) {
-        connection._handleClosed("session_destroyed")
+        connection._handleClosed(handleCloseReason)
       }
 
       const channelSubs = [...this._channelSubscriptions.values()]
 
       this._channelSubscriptions.clear()
       for (const subscription of channelSubs) {
-        subscription._handleClosed("session_destroyed")
+        subscription._handleClosed(handleCloseReason)
       }
 
       this._sessionId = null

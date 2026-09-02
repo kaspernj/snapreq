@@ -409,6 +409,22 @@ describe("SnapReqWebSocketClient", () => {
     await client.close()
   })
 
+  it("reports explicit client shutdown while handle acknowledgements are pending", async () => {
+    const client = new SnapReqWebSocketClient({url: server.url, autoReconnect: false})
+
+    await client.connect()
+
+    const subscription = client.subscribeChannel("DelayedChannel")
+    const connection = client.openConnection("DelayedConnection")
+    const readiness = Promise.all([
+      assert.rejects(subscription.ready, /Subscription closed before acknowledgement: client_close/),
+      assert.rejects(connection.ready, /Connection closed before open: client_close/)
+    ])
+
+    await client.disconnectAndStopReconnect()
+    await readiness
+  })
+
   it("re-establishes live handles exactly once on the fresh session when resume reports session gone", async () => {
     const resumeId = "live-handles"
     const client = new SnapReqWebSocketClient({
