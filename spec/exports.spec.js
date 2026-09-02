@@ -1,7 +1,6 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 
 const publicExports = [
   "snapreq",
@@ -22,7 +21,7 @@ describe("package exports", () => {
     it(`resolves ${publicExport}`, async () => {
       const module = await import(publicExport)
 
-      assert.equal(typeof module, "object")
+      expect(typeof module).toBe("object")
     })
   }
 })

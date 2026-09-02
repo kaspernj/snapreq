@@ -1,7 +1,6 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import {EventEmitter} from "node:events"
 import SnapReqWebSocketClient from "../src/websocket/websocket-client.js"
 
@@ -57,7 +56,7 @@ describe("SnapReqWebSocketClient heartbeat + unref", () => {
     client._startSocketKeepalive()
     client._stopSocketKeepalive()
 
-    assert.equal(socket.state.unreffed, true)
+    expect(socket.state.unreffed).toBeTrue()
   })
 
   it("terminates the socket when the peer never pongs", async () => {
@@ -69,8 +68,8 @@ describe("SnapReqWebSocketClient heartbeat + unref", () => {
     await new Promise((resolve) => setTimeout(resolve, 90))
     client._stopSocketKeepalive()
 
-    assert.ok(socket.state.pingCount >= 1, "should have pinged the peer")
-    assert.equal(socket.state.terminated, true, "should drop a peer that never pongs")
+    expect(socket.state.pingCount).toBeGreaterThanOrEqual(1)
+    expect(socket.state.terminated).toBeTrue()
   })
 
   it("keeps the socket alive while the peer pongs", async () => {
@@ -82,19 +81,19 @@ describe("SnapReqWebSocketClient heartbeat + unref", () => {
     await new Promise((resolve) => setTimeout(resolve, 90))
     client._stopSocketKeepalive()
 
-    assert.ok(socket.state.pingCount >= 1, "should have pinged the peer")
-    assert.equal(socket.state.terminated, false, "must not drop a ponging peer")
+    expect(socket.state.pingCount).toBeGreaterThanOrEqual(1)
+    expect(socket.state.terminated).toBeFalse()
   })
 
-  it("is a no-op when the implementation cannot ping (browser/undici)", () => {
+  it("is a no-op when the implementation cannot ping (browser/undici)", async () => {
     const client = heartbeatClient()
     const socket = new EventEmitter() // no ping/terminate/_socket
 
     client.socket = /** @type {any} */ (socket)
 
-    assert.doesNotThrow(() => {
+    await expect(() => {
       client._startSocketKeepalive()
       client._stopSocketKeepalive()
-    })
+    }).not.toThrow()
   })
 })

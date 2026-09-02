@@ -525,24 +525,40 @@ export default class SnapReqWebSocketClient {
 
     const socket = this.socket
 
-    if (!socket) return
-
-    if (socket.readyState === socket.CLOSED) {
-      this.socket = undefined
+    if (!socket) {
       this.connectPromise = undefined
       this._resetSessionReadyState()
+      this._closeSessionHandles("client_close")
+      return
+    }
+
+    if (this._closedSockets.has(socket) || socket.readyState === socket.CLOSED) {
+      if (this.socket === socket) {
+        this.socket = undefined
+        this.connectPromise = undefined
+        this._resetSessionReadyState()
+      }
+
+      this._closeSessionHandles("client_close")
+
+      if (socket.readyState !== socket.CLOSED) {
+        await new Promise((resolve) => socket.addEventListener("close", () => resolve(undefined), {once: true}))
+      }
+
       return
     }
 
     await new Promise((resolve) => {
       this._clientClosingSockets.add(socket)
-      socket.addEventListener("close", () => resolve(undefined))
-      socket.close()
+      socket.addEventListener("close", () => resolve(undefined), {once: true})
+      if (socket.readyState !== socket.CLOSING) socket.close()
     })
 
-    this.socket = undefined
-    this.connectPromise = undefined
-    this._resetSessionReadyState()
+    if (this.socket === socket) {
+      this.socket = undefined
+      this.connectPromise = undefined
+      this._resetSessionReadyState()
+    }
   }
 
   /**
@@ -964,6 +980,44 @@ export default class SnapReqWebSocketClient {
   }
 
   /**
+   * Permanently closes and removes every resumable connection and channel handle.
+   * @param {string} reason - Reason reported to each handle.
+   * @returns {void}
+   */
+  _closeSessionHandles(reason) {
+    const connections = [...this._connections.values()]
+    const channelSubscriptions = [...this._channelSubscriptions.values()]
+    let firstCallbackError
+    let callbackFailed = false
+
+    this._connections.clear()
+    this._channelSubscriptions.clear()
+    this._sessionId = null
+    this._awaitingResume = false
+    this._pendingSessionId = null
+
+    for (const connection of connections) {
+      try {
+        connection._handleClosed(reason)
+      } catch (error) {
+        if (!callbackFailed) firstCallbackError = error
+        callbackFailed = true
+      }
+    }
+
+    for (const subscription of channelSubscriptions) {
+      try {
+        subscription._handleClosed(reason)
+      } catch (error) {
+        if (!callbackFailed) firstCallbackError = error
+        callbackFailed = true
+      }
+    }
+
+    if (callbackFailed) throw firstCallbackError
+  }
+
+  /**
    * Processes one socket's terminal lifecycle exactly once.
    * @param {object} socket - Socket that closed or is being torn down.
    * @param {unknown} [error] - Failure propagated to pending operations.
@@ -991,6 +1045,11 @@ export default class SnapReqWebSocketClient {
       this.listeners.delete(subscriptionKey)
     }
 
+    this.pendingRequests.clear()
+    this.pendingSubscriptions.clear()
+    this.connectPromise = undefined
+    if (this.socket === socket) this.socket = undefined
+
     if (this._sessionId && this.autoReconnect) {
       // Session may resume when we reconnect — keep the handles alive and fire
       // onDisconnect so user code can pause UI work.
@@ -998,26 +1057,8 @@ export default class SnapReqWebSocketClient {
       for (const subscription of this._channelSubscriptions.values()) subscription._handleDisconnected()
     } else {
       // No resume path: tear down every live connection / channel sub.
-      const connections = [...this._connections.values()]
-
-      this._connections.clear()
-      for (const connection of connections) {
-        connection._handleClosed(handleCloseReason)
-      }
-
-      const channelSubs = [...this._channelSubscriptions.values()]
-
-      this._channelSubscriptions.clear()
-      for (const subscription of channelSubs) {
-        subscription._handleClosed(handleCloseReason)
-      }
-
-      this._sessionId = null
+      this._closeSessionHandles(handleCloseReason)
     }
-
-    this.pendingRequests.clear()
-    this.pendingSubscriptions.clear()
-    this.connectPromise = undefined
 
     if (!allowReconnect || !this.autoReconnect) return
 

@@ -1,7 +1,6 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import SnapReqWebSocketChannel from "../src/websocket/websocket-channel.js"
 
 function buildChannel() {
@@ -25,7 +24,7 @@ describe("SnapReqWebSocketChannel ready lifecycle", () => {
     const first = channel.ready
     const second = channel.ready
 
-    assert.strictEqual(second, first)
+    expect(second).toBe(first)
     channel._handleSubscribed()
     await first
   })
@@ -39,8 +38,8 @@ describe("SnapReqWebSocketChannel ready lifecycle", () => {
     // Must resolve, not reject with "closed before acknowledgement" — a benign
     // unmount race where the caller closed the subscription itself.
     await ready
-    assert.equal(channel.isClosed(), true)
-    assert.deepEqual(sent, [{subscriptionId: "sub-1", type: "channel-unsubscribe"}])
+    expect(channel.isClosed()).toBeTrue()
+    expect(sent).toEqual([{subscriptionId: "sub-1", type: "channel-unsubscribe"}])
   })
 
   it("rejects ready when the subscription closes before acknowledgement for any other reason", async () => {
@@ -49,7 +48,7 @@ describe("SnapReqWebSocketChannel ready lifecycle", () => {
 
     channel._handleClosed("server_shutdown")
 
-    await assert.rejects(ready, /Subscription closed before acknowledgement: server_shutdown/)
+    await expect(async () => await ready).toThrow(/Subscription closed before acknowledgement: server_shutdown/)
   })
 
   it("resolves ready when the subscription is acknowledged", async () => {
@@ -59,6 +58,6 @@ describe("SnapReqWebSocketChannel ready lifecycle", () => {
     channel._handleSubscribed()
 
     await ready
-    assert.equal(channel.isClosed(), false)
+    expect(channel.isClosed()).toBeFalse()
   })
 })

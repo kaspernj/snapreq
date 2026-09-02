@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import {existsSync, readFileSync, statSync} from "node:fs"
 import {fileURLToPath} from "node:url"
 import path from "node:path"
-import {describe, it} from "node:test"
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url))
 const packageJson = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"))
@@ -17,21 +16,19 @@ function read(relativePath) {
   return readFileSync(path.join(repoRoot, relativePath), "utf8")
 }
 
-describe("shared Hermes Compose package", () => {
+describe("SnapReq Hermes integration", () => {
   it("is an exact development-only dependency with lockfile integrity", () => {
-    assert.equal(packageJson.devDependencies[dependencyName], expectedVersion)
-    assert.equal(packageJson.dependencies?.[dependencyName], undefined)
-    assert.equal(packageLock.packages[""].devDependencies[dependencyName], expectedVersion)
+    expect(packageJson.devDependencies[dependencyName]).toBe(expectedVersion)
+    expect(packageJson.dependencies?.[dependencyName]).toBeUndefined()
+    expect(packageLock.packages[""].devDependencies[dependencyName]).toBe(expectedVersion)
 
     const locked = packageLock.packages[dependencyPath]
-    assert.equal(locked.version, expectedVersion)
-    assert.equal(locked.dev, true)
-    assert.equal(
-      locked.resolved,
+    expect(locked.version).toBe(expectedVersion)
+    expect(locked.dev).toBeTrue()
+    expect(locked.resolved).toBe(
       "https://registry.npmjs.org/@kaspernj/hermes-compose/-/hermes-compose-0.0.0.tgz"
     )
-    assert.equal(
-      locked.integrity,
+    expect(locked.integrity).toBe(
       "sha512-tA3DS8MxnGDoBiicoFwDqZ1Dk9BzYf1JvFk2QMyWsEPZr0NFp0q7s+ZYTX6ddu6gd0cW5141JRZKyBkdEsCbng=="
     )
   })
@@ -48,18 +45,16 @@ describe("shared Hermes Compose package", () => {
       "startCli",
       "validateConfig"
     ]) {
-      assert.equal(typeof publicApi[exportName], "function", `missing public export ${exportName}`)
+      expect(typeof publicApi[exportName]).toBe("function")
     }
 
     for (const binary of ["hermes-compose", "hermes-compose-threadwire-provider"]) {
       const binaryPath = path.join(repoRoot, "node_modules", ".bin", binary)
-      assert.ok(existsSync(binaryPath), `missing ${binary}`)
-      assert.ok(statSync(binaryPath).mode & 0o100, `${binary} must be executable`)
+      expect(existsSync(binaryPath)).toBeTrue()
+      expect(statSync(binaryPath).mode & 0o100).toBeTruthy()
     }
   })
-})
 
-describe("SnapReq Hermes consumer configuration", () => {
   it("loads and validates the checked-in config in an isolated environment", async () => {
     const {loadConfig} = await import(dependencyName)
     const config = await loadConfig({
@@ -69,7 +64,7 @@ describe("SnapReq Hermes consumer configuration", () => {
       }
     })
 
-    assert.deepEqual(config.repository, {
+    expect(config.repository).toEqual({
       name: "snapreq",
       slug: "kaspernj/snapreq",
       acceptedOrigins: [
@@ -79,11 +74,11 @@ describe("SnapReq Hermes consumer configuration", () => {
         "ssh://git@github.com/kaspernj/snapreq.git"
       ]
     })
-    assert.deepEqual(config.worktree, {
+    expect(config.worktree).toEqual({
       root: "/opt/hermes-dind-shared/worktrees/snapreq"
     })
-    assert.deepEqual(config.project, {prefix: "snapreq"})
-    assert.deepEqual(config.compose, {
+    expect(config.project).toEqual({prefix: "snapreq"})
+    expect(config.compose).toEqual({
       file: "compose.hermes.yml",
       filePath: path.join(repoRoot, "compose.hermes.yml"),
       dockerfile: "Dockerfile.hermes",
@@ -91,59 +86,57 @@ describe("SnapReq Hermes consumer configuration", () => {
       service: "dev",
       workspace: "/workspace"
     })
-    assert.deepEqual(config.identity, {uid: 1000, gid: 1000})
-    assert.deepEqual(config.volumes, [
+    expect(config.identity).toEqual({uid: 1000, gid: 1000})
+    expect(config.volumes).toEqual([
       {name: "node_modules", purpose: "node_modules", target: "/workspace/node_modules"},
       {name: "npm_cache", purpose: "npm_cache", target: "/home/node/.npm"},
       {name: "codex_home", purpose: "codex_home", target: "/home/node/.codex"}
     ])
-    assert.deepEqual(config.labels, {namespace: "io.kaspernj.hermes-compose"})
-    assert.deepEqual(config.proof, {
+    expect(config.labels).toEqual({namespace: "io.kaspernj.hermes-compose"})
+    expect(config.proof).toEqual({
       checksumFiles: ["compose.hermes.yml", "Dockerfile.hermes"]
     })
-    assert.deepEqual(config.checks, [["npm", "run", "all-checks"]])
-    assert.deepEqual(config.smoke, {
+    expect(config.checks).toEqual([["npm", "run", "all-checks"]])
+    expect(config.smoke).toEqual({
       branchPrefix: "hermes-smoke/",
       markerFile: ".hermes-smoke-marker",
       markerTemplate: "stack={project}\n"
     })
-    assert.deepEqual(config.worker, {
+    expect(config.worker).toEqual({
       bootstrapCli: "/usr/local/bin/hermes-compose",
       codexCommand: "codex",
       containerCli: "/workspace/node_modules/.bin/hermes-compose",
       threadwireCommand: "threadwire"
     })
-    assert.ok(Object.isFrozen(config))
+    expect(Object.isFrozen(config)).toBeTrue()
   })
 
   it("uses generic package-pinned Compose and Dockerfile wiring", () => {
     const compose = read("compose.hermes.yml")
     const dockerfile = read("Dockerfile.hermes")
 
-    assert.match(compose, /^name: \$\{HERMES_COMPOSE_PROJECT:\?/m)
-    assert.match(compose, /source: \$\{HERMES_SOURCE_PATH:\?/)
-    assert.match(compose, /PACKAGE_VERSION: "0\.0\.0"/)
-    assert.match(compose, /user: "1000:1000"/)
-    assert.match(compose, /io\.kaspernj\.hermes-compose\.service: dev/)
-    assert.match(compose, /io\.kaspernj\.hermes-compose\.network: default/)
+    expect(compose).toMatch(/^name: \$\{HERMES_COMPOSE_PROJECT:\?/m)
+    expect(compose).toMatch(/source: \$\{HERMES_SOURCE_PATH:\?/)
+    expect(compose).toMatch(/PACKAGE_VERSION: "0\.0\.0"/)
+    expect(compose).toMatch(/user: "1000:1000"/)
+    expect(compose).toMatch(/io\.kaspernj\.hermes-compose\.service: dev/)
+    expect(compose).toMatch(/io\.kaspernj\.hermes-compose\.network: default/)
     for (const purpose of ["node_modules", "npm_cache", "codex_home"]) {
-      assert.match(compose, new RegExp(`io\\.kaspernj\\.hermes-compose\\.purpose: ${purpose}`))
+      expect(compose).toMatch(new RegExp(`io\\.kaspernj\\.hermes-compose\\.purpose: ${purpose}`))
     }
-    assert.doesNotMatch(compose, /\b(?:ports|container_name):|docker\.sock/)
+    expect(compose).not.toMatch(/\b(?:ports|container_name):|docker\.sock/)
 
-    assert.match(dockerfile, /^FROM node:24\.\d+\.\d+-bookworm$/m)
-    assert.match(dockerfile, /ARG PACKAGE_VERSION=0\.0\.0/)
-    assert.match(dockerfile, /@kaspernj\/hermes-compose@\$\{PACKAGE_VERSION\}/)
-    assert.match(dockerfile, /io\.kaspernj\.hermes-compose\.image="dev"/)
-    assert.match(dockerfile, /^USER node$/m)
+    expect(dockerfile).toMatch(/^FROM node:24\.\d+\.\d+-bookworm$/m)
+    expect(dockerfile).toMatch(/ARG PACKAGE_VERSION=0\.0\.0/)
+    expect(dockerfile).toMatch(/@kaspernj\/hermes-compose@\$\{PACKAGE_VERSION\}/)
+    expect(dockerfile).toMatch(/io\.kaspernj\.hermes-compose\.image="dev"/)
+    expect(dockerfile).toMatch(/^USER node$/m)
   })
-})
 
-describe("SnapReq owns wiring rather than lifecycle implementation", () => {
   it("has no local scripts directory or stale active wiring", () => {
-    assert.equal(existsSync(path.join(repoRoot, "scripts")), false)
-    assert.equal(packageJson.scripts.eslint, "eslint src spec")
-    assert.equal(packageJson.scripts["hermes:check"], "node --test spec/hermes-compose-spec.js")
+    expect(existsSync(path.join(repoRoot, "scripts"))).toBeFalse()
+    expect(packageJson.scripts.eslint).toBe("eslint src spec")
+    expect(packageJson.scripts["hermes:check"]).toBe("velocious-test spec/hermes-compose.spec.js")
 
     const integrationFiles = [
       "AGENTS.md",
@@ -157,11 +150,9 @@ describe("SnapReq owns wiring rather than lifecycle implementation", () => {
     ]
     for (const file of integrationFiles) {
       const source = read(file)
-      assert.doesNotMatch(source, /SNAPREQ_|io\.snapreq\.hermes/, file)
-      assert.doesNotMatch(
-        source,
-        /scripts\/(?:hermes-command|hermes-compose|hermes-smoke|hermes-smoke-bootstrap|threadwire-compose-provider)(?:\.js)?/,
-        file
+      expect(source).not.toMatch(/SNAPREQ_|io\.snapreq\.hermes/)
+      expect(source).not.toMatch(
+        /scripts\/(?:hermes-command|hermes-compose|hermes-smoke|hermes-smoke-bootstrap|threadwire-compose-provider)(?:\.js)?/
       )
     }
   })
@@ -169,12 +160,12 @@ describe("SnapReq owns wiring rather than lifecycle implementation", () => {
   it("documents package ownership and safe package CLI usage", () => {
     const documentation = `${read("README.md")}\n${read("AGENTS.md")}`
 
-    assert.match(documentation, /@kaspernj\/hermes-compose/)
-    assert.match(documentation, /package owns (?:the )?lifecycle/i)
+    expect(documentation).toMatch(/@kaspernj\/hermes-compose/)
+    expect(documentation).toMatch(/package owns (?:the )?lifecycle/i)
     const outerCli = "npm exec --yes --package=@kaspernj/hermes-compose@0.0.0 -- hermes-compose"
-    assert.ok(documentation.includes(`${outerCli} validate`))
-    assert.ok(documentation.includes(`${outerCli} smoke`))
-    assert.doesNotMatch(documentation, /\.\/node_modules\/\.bin\/hermes-compose/)
-    assert.match(documentation, /Do not use .*Docker socket.*`docker cp`/s)
+    expect(documentation.includes(`${outerCli} validate`)).toBeTrue()
+    expect(documentation.includes(`${outerCli} smoke`)).toBeTrue()
+    expect(documentation).not.toMatch(/\.\/node_modules\/\.bin\/hermes-compose/)
+    expect(documentation).toMatch(/Do not use .*Docker socket.*`docker cp`/s)
   })
 })

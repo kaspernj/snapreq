@@ -1,16 +1,15 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import SnapReqHeaders from "../src/headers.js"
 
 describe("SnapReqHeaders", () => {
   it("looks up headers case-insensitively while preserving original casing", () => {
     const headers = new SnapReqHeaders({"Content-Type": "application/json"})
 
-    assert.equal(headers.get("content-type"), "application/json")
-    assert.equal(headers.get("CONTENT-TYPE"), "application/json")
-    assert.deepEqual(headers.toObject(), {"Content-Type": "application/json"})
+    expect(headers.get("content-type")).toBe("application/json")
+    expect(headers.get("CONTENT-TYPE")).toBe("application/json")
+    expect(headers.toObject()).toEqual({"Content-Type": "application/json"})
   })
 
   it("overwrites a header regardless of the casing used", () => {
@@ -18,29 +17,29 @@ describe("SnapReqHeaders", () => {
 
     headers.set("content-type", "application/json")
 
-    assert.equal(headers.get("Content-Type"), "application/json")
-    assert.equal(headers.toArray().length, 1)
+    expect(headers.get("Content-Type")).toBe("application/json")
+    expect(headers.toArray()).toHaveLength(1)
   })
 
   it("copies from another SnapReqHeaders instance", () => {
     const source = new SnapReqHeaders({Authorization: "Bearer x"})
     const copy = new SnapReqHeaders(source)
 
-    assert.equal(copy.get("authorization"), "Bearer x")
+    expect(copy.get("authorization")).toBe("Bearer x")
   })
 
   it("copies from structurally compatible header iterables", () => {
     const source = new SnapReqHeaders({"X-Source": "yes"})
     const copy = new SnapReqHeaders([...source])
 
-    assert.deepEqual([...source], [["X-Source", "yes"]])
-    assert.equal(copy.get("x-source"), "yes")
+    expect([...source]).toEqual([["X-Source", "yes"]])
+    expect(copy.get("x-source")).toBe("yes")
   })
 
   it("joins array values and skips null/undefined", () => {
     const headers = new SnapReqHeaders({Accept: ["application/json", "text/plain"], "X-None": /** @type {any} */ (null)})
 
-    assert.equal(headers.get("accept"), "application/json, text/plain")
-    assert.equal(headers.has("x-none"), false)
+    expect(headers.get("accept")).toBe("application/json, text/plain")
+    expect(headers.has("x-none")).toBeFalse()
   })
 })

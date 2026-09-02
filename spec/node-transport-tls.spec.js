@@ -1,7 +1,6 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import NodeTransport from "../src/transports/node-transport.js"
 
 describe("NodeTransport TLS wiring", () => {
@@ -12,11 +11,11 @@ describe("NodeTransport TLS wiring", () => {
     const agent = transport._agent(true)
 
     try {
-      assert.equal(agent.options.ca, "ca-cert")
-      assert.equal(agent.options.cert, "client-cert")
-      assert.equal(agent.options.key, "client-key")
-      assert.equal(agent.options.rejectUnauthorized, false)
-      assert.equal(agent.keepAlive, true)
+      expect(agent.options.ca).toBe("ca-cert")
+      expect(agent.options.cert).toBe("client-cert")
+      expect(agent.options.key).toBe("client-key")
+      expect(agent.options.rejectUnauthorized).toBe(false)
+      expect(agent.keepAlive).toBe(true)
     } finally {
       transport.close()
     }
@@ -29,7 +28,7 @@ describe("NodeTransport TLS wiring", () => {
     const agent = transport._agent(true)
 
     try {
-      assert.equal(agent.options.rejectUnauthorized, true)
+      expect(agent.options.rejectUnauthorized).toBe(true)
     } finally {
       transport.close()
     }
@@ -42,7 +41,7 @@ describe("NodeTransport TLS wiring", () => {
     const agent = transport._agent(true)
 
     try {
-      assert.equal(agent.options.rejectUnauthorized, undefined)
+      expect(agent.options.rejectUnauthorized).toBe(undefined)
     } finally {
       transport.close()
     }
