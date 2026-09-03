@@ -566,7 +566,7 @@ describe("SnapReqWebSocketClient", () => {
     expect(subscription.isClosed()).toBe(true)
   })
 
-  it("closes preserved handles while a failed reconnect socket is still closing", async () => {
+  it("waits for a failed reconnect socket after a replacement connection opens", async () => {
     let connectionAttempt = 0
     /** @type {(() => void) | undefined} */
     let resolveReconnectCloseStarted
@@ -579,7 +579,7 @@ describe("SnapReqWebSocketClient", () => {
       constructor() {
         super()
         connectionAttempt += 1
-        this.failConnection = connectionAttempt > 1
+        this.failConnection = connectionAttempt === 2
       }
 
       close() {
@@ -597,6 +597,19 @@ describe("SnapReqWebSocketClient", () => {
       finishClose() {
         this.readyState = this.CLOSED
         this.dispatchEvent(new Event("close"))
+      }
+
+      send(raw) {
+        const message = JSON.parse(raw)
+
+        if (message.type === "session-resume") {
+          queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify({type: "session-resumed", sessionId: message.sessionId})
+          })))
+          return
+        }
+
+        super.send(raw)
       }
     }
 
@@ -626,12 +639,97 @@ describe("SnapReqWebSocketClient", () => {
     if (!reconnectSocket) throw new Error("Failed reconnect socket did not start closing")
 
     expect(reconnectSocket.readyState).toBe(reconnectSocket.CLOSING)
-    await client.disconnectAndStopReconnect()
+    await client.connect({autoReconnect: false})
+    expect(client.socket).not.toBe(reconnectSocket)
+
+    let disconnectResolved = false
+    const disconnect = client.disconnectAndStopReconnect().then(() => { disconnectResolved = true })
+
+    await delay(0)
     expect(connectionCloseReasons).toEqual(["client_close"])
     expect(subscriptionCloseReasons).toEqual(["client_close"])
+    expect(disconnectResolved).toBe(false)
 
     reconnectSocket.finishClose()
+    await disconnect
+    expect(disconnectResolved).toBe(true)
+  })
+
+  it("waits for a failed reconnect socket when a close callback throws", async () => {
+    let connectionAttempt = 0
+    /** @type {(() => void) | undefined} */
+    let resolveReconnectCloseStarted
+    /** @type {GatedCallbackWebSocket | undefined} */
+    let reconnectSocket
+    const reconnectCloseStarted = new Promise((resolve) => { resolveReconnectCloseStarted = resolve })
+
+    class GatedCallbackWebSocket extends ResumableWebSocket {
+      constructor() {
+        super()
+        connectionAttempt += 1
+        this.failConnection = connectionAttempt > 1
+      }
+
+      close() {
+        if (!this.failConnection) {
+          super.close()
+          return
+        }
+
+        this.readyState = this.CLOSING
+        reconnectSocket = this
+        if (!resolveReconnectCloseStarted) throw new Error("Reconnect close-start resolver was not initialized")
+        resolveReconnectCloseStarted()
+      }
+
+      finishClose() {
+        this.readyState = this.CLOSED
+        this.dispatchEvent(new Event("close"))
+      }
+    }
+
+    const client = new SnapReqWebSocketClient({
+      url: "ws://failed-reconnect-callback.test",
+      autoReconnect: true,
+      reconnectDelays: [0],
+      webSocketImplementation: /** @type {any} */ (GatedCallbackWebSocket)
+    })
+    const callbackError = new Error("close callback failed")
+    /** @type {string[]} */
+    const subscriptionCloseReasons = []
+
+    await client.connect()
+    const connection = client.openConnection("ChatConnection", {
+      onClose: () => { throw callbackError }
+    })
+    const subscription = client.subscribeChannel("TickChannel", {
+      onClose: (reason) => subscriptionCloseReasons.push(reason)
+    })
+
+    await connection.ready
+    await subscription.ready
+    await client.dropConnection()
+    await reconnectCloseStarted
+    if (!reconnectSocket) throw new Error("Failed reconnect socket did not start closing")
+
+    let disconnectError
+    let disconnectSettled = false
+    const disconnect = client.disconnectAndStopReconnect().then(
+      () => { disconnectSettled = true },
+      (error) => {
+        disconnectError = error
+        disconnectSettled = true
+      }
+    )
+
     await delay(0)
+    const settledBeforeSocketClosed = disconnectSettled
+    reconnectSocket.finishClose()
+    await disconnect
+
+    expect(settledBeforeSocketClosed).toBe(false)
+    expect(disconnectError).toBe(callbackError)
+    expect(subscriptionCloseReasons).toEqual(["client_close"])
   })
 
   it("preserves a reconnect started by an explicit close callback", async () => {

@@ -130,6 +130,9 @@ export default class SnapReqWebSocketClient {
 
     /** @type {WeakSet<object>} - Sockets closed through the client's explicit shutdown API. */
     this._clientClosingSockets = new WeakSet()
+
+    /** @type {Set<WebSocket>} - Failed sockets still waiting for their terminal close event. */
+    this._closingSockets = new Set()
   }
 
   /** @returns {boolean} - Whether the socket is open. */
@@ -391,16 +394,19 @@ export default class SnapReqWebSocketClient {
         failedSocket.removeEventListener("message", this.onMessage)
         failedSocket.removeEventListener("close", this.onClose)
         this._stopSocketKeepalive()
-        this._handleSocketClose(failedSocket, error, false)
+        this._closingSockets.add(failedSocket)
+        const failedSocketClose = this._closeSocketAndWait(failedSocket)
 
-        if (failedSocket.readyState !== failedSocket.CLOSED) {
-          await new Promise((resolve) => {
-            failedSocket.addEventListener("close", () => resolve(undefined), {once: true})
-            failedSocket.close()
-          })
+        try {
+          this._handleSocketClose(failedSocket, error, false)
+        } finally {
+          try {
+            await failedSocketClose
+          } finally {
+            this._closingSockets.delete(failedSocket)
+            if (this.socket === failedSocket) this.socket = undefined
+          }
         }
-
-        if (this.socket === failedSocket) this.socket = undefined
       }
 
       throw error
@@ -513,6 +519,20 @@ export default class SnapReqWebSocketClient {
   }
 
   /**
+   * Starts closing a socket when needed and waits for its terminal event.
+   * @param {WebSocket} socket - Socket to close.
+   * @returns {Promise<void>} - Resolves once the socket is closed.
+   */
+  async _closeSocketAndWait(socket) {
+    if (socket.readyState === socket.CLOSED) return
+
+    await new Promise((resolve) => {
+      socket.addEventListener("close", () => resolve(undefined), {once: true})
+      if (socket.readyState !== socket.CLOSING) socket.close()
+    })
+  }
+
+  /**
    * Closes the WebSocket and clears pending state.
    * @returns {Promise<void>} - Resolves once closed.
    */
@@ -524,35 +544,40 @@ export default class SnapReqWebSocketClient {
     this._stopSocketKeepalive()
 
     const socket = this.socket
+    const socketsToClose = new Set(this._closingSockets)
+
+    if (socket) socketsToClose.add(socket)
 
     if (!socket) {
       this.connectPromise = undefined
       this._resetSessionReadyState()
-      this._closeSessionHandles("client_close")
-      return
     }
 
-    if (this._closedSockets.has(socket) || socket.readyState === socket.CLOSED) {
-      if (this.socket === socket) {
+    if (!socket || this._closedSockets.has(socket) || socket.readyState === socket.CLOSED) {
+      let handleCloseError
+      let handleCloseFailed = false
+
+      try {
+        this._closeSessionHandles("client_close")
+      } catch (error) {
+        handleCloseError = error
+        handleCloseFailed = true
+      }
+
+      await Promise.all([...socketsToClose].map((closingSocket) => this._closeSocketAndWait(closingSocket)))
+
+      if (socket && this.socket === socket) {
         this.socket = undefined
         this.connectPromise = undefined
         this._resetSessionReadyState()
       }
 
-      this._closeSessionHandles("client_close")
-
-      if (socket.readyState !== socket.CLOSED) {
-        await new Promise((resolve) => socket.addEventListener("close", () => resolve(undefined), {once: true}))
-      }
-
+      if (handleCloseFailed) throw handleCloseError
       return
     }
 
-    await new Promise((resolve) => {
-      this._clientClosingSockets.add(socket)
-      socket.addEventListener("close", () => resolve(undefined), {once: true})
-      if (socket.readyState !== socket.CLOSING) socket.close()
-    })
+    this._clientClosingSockets.add(socket)
+    await Promise.all([...socketsToClose].map((closingSocket) => this._closeSocketAndWait(closingSocket)))
 
     if (this.socket === socket) {
       this.socket = undefined
@@ -1019,7 +1044,7 @@ export default class SnapReqWebSocketClient {
 
   /**
    * Processes one socket's terminal lifecycle exactly once.
-   * @param {object} socket - Socket that closed or is being torn down.
+   * @param {WebSocket} socket - Socket that closed or is being torn down.
    * @param {unknown} [error] - Failure propagated to pending operations.
    * @param {boolean} [allowReconnect] - Whether this close may schedule reconnect.
    * @returns {void}
@@ -1048,7 +1073,7 @@ export default class SnapReqWebSocketClient {
     this.pendingRequests.clear()
     this.pendingSubscriptions.clear()
     this.connectPromise = undefined
-    if (this.socket === socket) this.socket = undefined
+    if (this.socket === socket && socket.readyState === socket.CLOSED) this.socket = undefined
 
     if (this._sessionId && this.autoReconnect) {
       // Session may resume when we reconnect — keep the handles alive and fire
