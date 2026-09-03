@@ -1,0 +1,1 @@
+Explicit WebSocket client shutdowns now close live connection and channel handles with `client_close` instead of reporting an unexpected destroyed session, and wait for failed sockets to finish closing.

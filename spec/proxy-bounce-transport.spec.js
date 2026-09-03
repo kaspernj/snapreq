@@ -1,7 +1,6 @@
 // @ts-check
 
-import {describe, it} from "node:test"
-import assert from "node:assert/strict"
+import {describe, expect, it} from "@velocious/testing"
 import http from "node:http"
 import SnapReq from "../src/snap-req.js"
 import ProxyBounceTransport from "../src/transports/proxy-bounce-transport.js"
@@ -73,14 +72,14 @@ async function startMockProxy(options = {}) {
 
 describe("ProxyBounceTransport", () => {
   it("has transportName", () => {
-    assert.equal(ProxyBounceTransport.transportName, "proxy-bounce")
+    expect(ProxyBounceTransport.transportName).toBe("proxy-bounce")
   })
 
   it("reports abort capability", () => {
     const transport = new ProxyBounceTransport({proxyUrl: "http://localhost/proxy"})
 
-    assert.equal(transport.capabilities.abort, true)
-    assert.equal(transport.capabilities.responseStreaming, false)
+    expect(transport.capabilities.abort).toBe(true)
+    expect(transport.capabilities.responseStreaming).toBe(false)
   })
 
   it("performs a GET through the mock proxy", async () => {
@@ -96,13 +95,13 @@ describe("ProxyBounceTransport", () => {
 
       const response = await client.get("/ping")
 
-      assert.equal(response.status, 200)
-      assert.equal(response.ok, true)
-      assert.deepEqual(await response.json(), {ok: true})
+      expect(response.status).toBe(200)
+      expect(response.ok).toBe(true)
+      expect(await response.json()).toEqual({ok: true})
 
-      assert.equal(proxy.payloads.length, 1)
-      assert.equal(proxy.payloads[0].method, "GET")
-      assert.equal(proxy.payloads[0].url, "http://example.com/ping")
+      expect(proxy.payloads.length).toBe(1)
+      expect(proxy.payloads[0].method).toBe("GET")
+      expect(proxy.payloads[0].url).toBe("http://example.com/ping")
 
       client.close()
     } finally {
@@ -122,9 +121,9 @@ describe("ProxyBounceTransport", () => {
 
       await client.get("/test", {headers: {"X-Request": "world"}})
 
-      assert.equal(proxy.payloads.length, 1)
-      assert.equal(proxy.payloads[0].headers["X-Custom"], "hello")
-      assert.equal(proxy.payloads[0].headers["X-Request"], "world")
+      expect(proxy.payloads.length).toBe(1)
+      expect(proxy.payloads[0].headers["X-Custom"]).toBe("hello")
+      expect(proxy.payloads[0].headers["X-Request"]).toBe("world")
 
       client.close()
     } finally {
@@ -147,9 +146,9 @@ describe("ProxyBounceTransport", () => {
 
       const response = await client.get("/missing")
 
-      assert.equal(response.status, 404)
-      assert.equal(response.ok, false)
-      assert.deepEqual(await response.json(), {error: "not found"})
+      expect(response.status).toBe(404)
+      expect(response.ok).toBe(false)
+      expect(await response.json()).toEqual({error: "not found"})
 
       client.close()
     } finally {
@@ -173,8 +172,8 @@ describe("ProxyBounceTransport", () => {
       const decoder = new TextDecoder()
       let text = ""
 
-      assert.equal(response.headers.get("content-type"), "text/event-stream")
-      assert.equal(response.streamable, true)
+      expect(response.headers.get("content-type")).toBe("text/event-stream")
+      expect(response.streamable).toBe(true)
 
       for await (const chunk of response.stream()) {
         text += decoder.decode(chunk, {stream: true})
@@ -182,8 +181,8 @@ describe("ProxyBounceTransport", () => {
 
       text += decoder.decode()
 
-      assert.equal(text, "data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n")
-      assert.equal(response.streamable, false)
+      expect(text).toBe("data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n")
+      expect(response.streamable).toBe(false)
 
       client.close()
     } finally {
