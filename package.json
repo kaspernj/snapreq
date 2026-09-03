@@ -1,6 +1,6 @@
 {
   "name": "snapreq",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "description": "Cross-platform HTTP and WebSocket client with one API across Node, web, Expo and React Native",
   "type": "module",
   "main": "./build/snap-req.js",
