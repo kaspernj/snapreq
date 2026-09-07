@@ -1,1 +1,3 @@
 Fix coalesced WebSocket open/session-establishment events incorrectly resuming a fresh session or replacing the prior session ID. Fence reconnect and cold-session-store readiness until the actual session outcome, including concurrent connect callers, so channel subscriptions are not duplicated or lost. Reproduces the tenant-subscription failure investigated in TensorBuzz PR #1236 (https://github.com/kaspernj/tensorbuzz/pull/1236); the original CI packet ordering was not recorded.
+
+Keep readiness failures local to their connection generation so every concurrent caller rejects when the socket closes before resume completes, while later connections can succeed independently.

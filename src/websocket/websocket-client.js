@@ -105,8 +105,8 @@ export default class SnapReqWebSocketClient {
     /** @type {(() => void) | null} */
     this._resolveSessionReady = null
 
-    /** @type {unknown | null} */
-    this._sessionReadyError = null
+    /** @type {((error: unknown) => void) | null} */
+    this._rejectSessionReady = null
 
     /** @type {{get: () => string | null | undefined | Promise<string | null | undefined>, set: (sessionId: string) => void | Promise<void>, clear: () => void | Promise<void>} | undefined} */
     this._sessionStore = sessionStore
@@ -1247,19 +1247,14 @@ export default class SnapReqWebSocketClient {
     if (this._sessionReady) return Promise.resolve()
 
     if (!this._sessionReadyPromise || !this._resolveSessionReady) {
-      this._sessionReadyPromise = new Promise((resolve) => {
+      this._sessionReadyPromise = new Promise((resolve, reject) => {
         this._resolveSessionReady = resolve
+        this._rejectSessionReady = reject
       })
     }
 
-    return this._sessionReadyPromise.then(() => {
-      if (this._sessionReadyError) {
-        const error = this._sessionReadyError
-
-        this._sessionReadyError = null
-        throw error
-      }
-    })
+    // The settled promise keeps this generation's outcome for every waiter.
+    return this._sessionReadyPromise
   }
 
   /** @returns {void} */
@@ -1267,9 +1262,9 @@ export default class SnapReqWebSocketClient {
     if (this._sessionReady) return
 
     this._sessionReady = true
-    this._sessionReadyError = null
     this._resolveSessionReady?.()
     this._resolveSessionReady = null
+    this._rejectSessionReady = null
     this._sessionReadyPromise = null
   }
 
@@ -1280,10 +1275,10 @@ export default class SnapReqWebSocketClient {
   _resetSessionReadyState(error = new Error("Websocket session readiness was reset")) {
     this._sessionReady = false
     this._pendingSessionId = null
-    this._sessionReadyError = error
-    this._resolveSessionReady?.()
+    this._rejectSessionReady?.(error)
     this._sessionReadyPromise = null
     this._resolveSessionReady = null
+    this._rejectSessionReady = null
   }
 }
 

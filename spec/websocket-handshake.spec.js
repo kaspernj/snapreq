@@ -163,6 +163,54 @@ describe("WebSocket handshake ordering", () => {
     })
   }
 
+  it("rejects every reconnect waiter when the socket closes before resume without poisoning the next generation", async () => {
+    const transport = handshakeTransport()
+    const client = new SnapReqWebSocketClient({url: "ws://handshake.test", webSocketImplementation: transport.WebSocket})
+    const firstCreated = transport.nextSocket()
+    const firstConnect = client.connect()
+    const firstSocket = await firstCreated
+
+    try {
+      firstSocket.establish("original-session")
+      await firstConnect
+      await client.dropConnection()
+
+      const reconnectCreated = transport.nextSocket()
+      const reconnect = client.connect({autoReconnect: false})
+      const concurrentReconnect = client.connect({autoReconnect: false})
+      const reconnectResults = Promise.allSettled([reconnect, concurrentReconnect])
+      const socket = await reconnectCreated
+      socket.establish("replacement-session")
+      const resume = await socket.resumeRequested.promise
+
+      expect(resume.sessionId).toBe("original-session")
+      expect(client.isOpen()).toBe(true)
+      expect(client.isSessionReady()).toBe(false)
+      socket.close()
+
+      const results = await reconnectResults
+      expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"])
+      expect(results[0].reason).toBeInstanceOf(Error)
+      expect(results[0].reason.message).toBe("Websocket session readiness was reset")
+      expect(results[1].reason).toBe(results[0].reason)
+      expect(client.isOpen()).toBe(false)
+      expect(client.isSessionReady()).toBe(false)
+
+      const nextCreated = transport.nextSocket()
+      const nextConnect = client.connect()
+      const nextConcurrentConnect = client.connect()
+      const nextSocket = await nextCreated
+      nextSocket.establish("next-session")
+      await Promise.all([nextConnect, nextConcurrentConnect])
+
+      expect(client.isOpen()).toBe(true)
+      expect(client.isSessionReady()).toBe(true)
+      expect(nextSocket.sent.filter((message) => message.type === "session-resume")).toEqual([])
+    } finally {
+      await client.close()
+    }
+  })
+
   for (const storedId of ["stored-session", null]) {
     it(`waits for cold session storage before accepting coalesced establishment (${storedId ?? "empty"})`, async () => {
       const transport = handshakeTransport()
