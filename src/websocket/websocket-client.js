@@ -105,8 +105,8 @@ export default class SnapReqWebSocketClient {
     /** @type {(() => void) | null} */
     this._resolveSessionReady = null
 
-    /** @type {unknown | null} */
-    this._sessionReadyError = null
+    /** @type {((error: unknown) => void) | null} */
+    this._rejectSessionReady = null
 
     /** @type {{get: () => string | null | undefined | Promise<string | null | undefined>, set: (sessionId: string) => void | Promise<void>, clear: () => void | Promise<void>} | undefined} */
     this._sessionStore = sessionStore
@@ -443,11 +443,21 @@ export default class SnapReqWebSocketClient {
     }
 
     if (this.socket && this.socket.readyState === this.socket.OPEN) return await this._waitForSessionReady()
-    if (this.connectPromise) return this.connectPromise
+    if (this.connectPromise) {
+      await this.connectPromise
+      return await this._waitForSessionReady()
+    }
 
     this._resetSessionReadyState()
     this._waitingForOnline = false
     this.connectionAttempts += 1
+
+    // Capture resume intent before open and session-established can arrive in
+    // one transport turn. A newly established ID is never a resume candidate.
+    let resumeSessionId = this._sessionId
+    const restoreSessionStore = !resumeSessionId && !this._sessionStoreRestored && this._sessionStore
+
+    this._awaitingResume = Boolean(resumeSessionId || restoreSessionStore)
 
     this.connectPromise = new Promise((resolve, reject) => {
       this.socket = new this._WebSocket(this.url)
@@ -484,13 +494,14 @@ export default class SnapReqWebSocketClient {
 
     // Cold restore from external persistence (sessionStore) on the very first
     // connect: apps wire this up to survive a full page reload.
-    if (!this._sessionId && !this._sessionStoreRestored && this._sessionStore) {
+    if (restoreSessionStore) {
       this._sessionStoreRestored = true
 
       try {
-        const storedId = await this._sessionStore.get()
+        const storedId = await restoreSessionStore.get()
 
         if (typeof storedId === "string" && storedId.length > 0) {
+          resumeSessionId = storedId
           this._sessionId = storedId
         }
       } catch (error) {
@@ -501,13 +512,16 @@ export default class SnapReqWebSocketClient {
     // If we have a cached sessionId from a prior connect, ask the server to
     // resume it. The server replies with either `session-resumed` (state
     // preserved) or `session-gone` (start fresh).
-    if (this._sessionId) {
-      this._awaitingResume = true
-      this._sendMessage({type: "session-resume", sessionId: this._sessionId})
+    if (resumeSessionId) {
       // Fire onDisconnect on live handles so apps can pause UI work until
       // session-resumed / session-gone arrives.
       for (const connection of this._connections.values()) connection._handleDisconnected()
       for (const subscription of this._channelSubscriptions.values()) subscription._handleDisconnected()
+      this._sendMessage({type: "session-resume", sessionId: resumeSessionId})
+    } else if (restoreSessionStore) {
+      this._awaitingResume = false
+      // Storage may resolve empty after establishment was buffered above.
+      if (this._pendingSessionId) this._acceptEstablishedSession()
     }
 
     if (Object.keys(this._metadata).length > 0) {
@@ -882,16 +896,7 @@ export default class SnapReqWebSocketClient {
       this._pendingSessionId = typeof message.sessionId === "string" ? message.sessionId : null
 
       // First connect: cache sessionId for future resume attempts.
-      if (!this._awaitingResume) {
-        this._sessionId = this._pendingSessionId
-        if (this._sessionId) {
-          this._persistSessionId(this._sessionId)
-        }
-
-        this._markSessionReady()
-        this._sendPendingConnections()
-        this._sendPendingChannelSubscriptions()
-      }
+      if (!this._awaitingResume) this._acceptEstablishedSession()
     } else if (type === "session-resumed") {
       this._awaitingResume = false
       this._pendingSessionId = null
@@ -1227,24 +1232,29 @@ export default class SnapReqWebSocketClient {
     }
   }
 
+  /** @returns {void} - Accepts a fresh session after ruling out a prior session to resume. */
+  _acceptEstablishedSession() {
+    this._sessionId = this._pendingSessionId
+    if (this._sessionId) this._persistSessionId(this._sessionId)
+
+    this._markSessionReady()
+    this._sendPendingConnections()
+    this._sendPendingChannelSubscriptions()
+  }
+
   /** @returns {Promise<void>} - Resolves once the session is ready. */
   _waitForSessionReady() {
     if (this._sessionReady) return Promise.resolve()
 
     if (!this._sessionReadyPromise || !this._resolveSessionReady) {
-      this._sessionReadyPromise = new Promise((resolve) => {
+      this._sessionReadyPromise = new Promise((resolve, reject) => {
         this._resolveSessionReady = resolve
+        this._rejectSessionReady = reject
       })
     }
 
-    return this._sessionReadyPromise.then(() => {
-      if (this._sessionReadyError) {
-        const error = this._sessionReadyError
-
-        this._sessionReadyError = null
-        throw error
-      }
-    })
+    // The settled promise keeps this generation's outcome for every waiter.
+    return this._sessionReadyPromise
   }
 
   /** @returns {void} */
@@ -1252,9 +1262,9 @@ export default class SnapReqWebSocketClient {
     if (this._sessionReady) return
 
     this._sessionReady = true
-    this._sessionReadyError = null
     this._resolveSessionReady?.()
     this._resolveSessionReady = null
+    this._rejectSessionReady = null
     this._sessionReadyPromise = null
   }
 
@@ -1265,10 +1275,10 @@ export default class SnapReqWebSocketClient {
   _resetSessionReadyState(error = new Error("Websocket session readiness was reset")) {
     this._sessionReady = false
     this._pendingSessionId = null
-    this._sessionReadyError = error
-    this._resolveSessionReady?.()
+    this._rejectSessionReady?.(error)
     this._sessionReadyPromise = null
     this._resolveSessionReady = null
+    this._rejectSessionReady = null
   }
 }
 
