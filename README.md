@@ -167,6 +167,8 @@ connection.sendMessage({text: "hi"})
 
 Optional adapters: `networkMonitor` (gate reconnects on online state), `sessionStore` (persist the session id across reloads) and `deserialize` (a `(value) => value` transform applied inside `response.json()` so an app can re-hydrate its own wire format).
 
+Session resumption uses only an ID retained from a previous connection or restored from `sessionStore`, never the ID just assigned to a fresh socket. This remains true when the socket's open event and first session frame arrive together. Every `connect()` caller waits for session readiness: on reconnect, the new socket's establishment frame alone does not release callers or queued subscriptions before `session-resumed` or `session-gone` arrives.
+
 ## Hermes Compose development
 
 The repository includes a task-isolated Node 24 development environment for
