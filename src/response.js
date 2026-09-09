@@ -41,10 +41,11 @@ export default class SnapReqResponse {
    * @param {AsyncIterable<Uint8Array>} [options.stream] - Streamed body, when the transport supports streaming.
    * @param {import("node:stream").Readable} [options.nodeStream] - Raw Node stream, when available, for advanced consumers.
    * @param {() => void} [options.onBodyDone] - Callback fired when body reading finishes or fails.
+   * @param {() => void} [options.onBodyProgress] - Callback fired when a non-empty body chunk is delivered.
    * @param {(error: unknown) => unknown} [options.mapBodyError] - Maps body read errors before rethrowing.
    * @param {(error: unknown) => void} [options.cancelBody] - Cancels transport-owned body resources.
    */
-  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, mapBodyError, cancelBody}) {
+  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, onBodyProgress, mapBodyError, cancelBody}) {
     this.url = url
     this.method = method
     this.status = status
@@ -59,6 +60,7 @@ export default class SnapReqResponse {
     this._streamConsumed = false
     this._bodyDone = false
     this._onBodyDone = onBodyDone
+    this._onBodyProgress = onBodyProgress
     this._mapBodyError = mapBodyError
     this._cancelBody = cancelBody
     /** @type {unknown | null} */
@@ -170,6 +172,7 @@ export default class SnapReqResponse {
     return (async function* () {
       try {
         for await (const chunk of source) {
+          if (chunk.byteLength > 0 && response._onBodyProgress) response._onBodyProgress()
           yield chunk
         }
         if (response._bodyAbortError) throw response._bodyAbortError

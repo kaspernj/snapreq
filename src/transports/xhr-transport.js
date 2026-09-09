@@ -58,7 +58,36 @@ export default class XhrTransport {
 
       request.signal?.addEventListener("abort", abort, {once: true})
 
-      const cleanup = () => request.signal?.removeEventListener("abort", abort)
+      const cleanup = () => {
+        request.signal?.removeEventListener("abort", abort)
+        xhr.onreadystatechange = null
+        xhr.onprogress = null
+        if (xhr.upload) xhr.upload.onprogress = null
+      }
+
+      if (request.idleTimeoutMs && request.idleTimeoutMs > 0) {
+        if (request.body.kind !== "none" && !xhr.upload) {
+          cleanup()
+          reject(new SnapReqUnsupportedFeatureError({
+            feature: "idle timeouts for request bodies",
+            transport: "xhr",
+            detail: "this XMLHttpRequest implementation does not expose upload progress"
+          }))
+          return
+        }
+
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState >= 2) request.onProgress?.("response_body")
+        }
+        xhr.onprogress = (event) => {
+          if (event.loaded > 0) request.onProgress?.("response_body")
+        }
+        if (xhr.upload) {
+          xhr.upload.onprogress = (event) => {
+            if (event.loaded > 0) request.onProgress?.("request_body")
+          }
+        }
+      }
 
       xhr.onload = () => {
         cleanup()

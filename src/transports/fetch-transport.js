@@ -5,6 +5,16 @@ import {SnapReqAbortError, SnapReqUnsupportedFeatureError} from "../errors.js"
 import SnapReqHeaders from "../headers.js"
 import SnapReqResponse from "../response.js"
 
+const FETCH_NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+/**
+ * @param {Uint8Array} bytes - Already-complete response bytes.
+ * @yields {Uint8Array} - The non-empty response bytes, when present.
+ */
+async function* completedByteStream(bytes) {
+  if (bytes.byteLength > 0) yield bytes
+}
+
 /**
  * Transport backed by the `fetch` global. Works on web, Expo / React Native and
  * Node 18+. It cannot open Unix sockets, present client certificates or
@@ -38,6 +48,14 @@ export default class FetchTransport {
   async performRequest(request) {
     if (request.bodyCompression && request.bodyCompression !== "identity") {
       throw new SnapReqUnsupportedFeatureError({feature: "request body compression", transport: "fetch"})
+    }
+
+    if (request.idleTimeoutMs && request.idleTimeoutMs > 0 && request.body.kind !== "none") {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "idle timeouts for request bodies",
+        transport: "fetch",
+        detail: "fetch does not expose upload progress"
+      })
     }
 
     /** @type {Record<string, any>} */
@@ -82,6 +100,37 @@ export default class FetchTransport {
       throw error
     }
 
+    if (!fetchResponse.body && (request.method === "HEAD" || FETCH_NULL_BODY_STATUSES.has(fetchResponse.status))) {
+      finishBodyControl()
+      const bytes = new Uint8Array(0)
+
+      return new SnapReqResponse({
+        url: request.url,
+        method: request.method,
+        status: fetchResponse.status,
+        statusText: fetchResponse.statusText,
+        headers: this._responseHeaders(fetchResponse),
+        bytes,
+        stream: completedByteStream(bytes)
+      })
+    }
+
+    if (
+      request.idleTimeoutMs &&
+      request.idleTimeoutMs > 0 &&
+      (!fetchResponse.body || typeof fetchResponse.body.getReader !== "function")
+    ) {
+      const error = new SnapReqUnsupportedFeatureError({
+        feature: "idle timeouts for buffered responses",
+        transport: "fetch",
+        detail: "this fetch implementation does not expose response progress"
+      })
+
+      bodyController.abort(error)
+      finishBodyControl()
+      throw error
+    }
+
     const responseStream = this._responseStream(fetchResponse, {
       cancel: (reason) => {
         bodyController.abort(reason)
@@ -97,7 +146,13 @@ export default class FetchTransport {
       statusText: fetchResponse.statusText,
       headers: this._responseHeaders(fetchResponse),
       stream: responseStream,
-      cancelBody: (error) => responseStream.cancel?.(error)
+      cancelBody: (error) => {
+        try {
+          responseStream.cancel?.(error)
+        } finally {
+          finishBodyControl()
+        }
+      }
     })
   }
 

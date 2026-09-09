@@ -68,7 +68,7 @@ export class SnapReqAbortError extends SnapReqError {
   }
 }
 
-/** Thrown when a request exceeds its configured timeout. */
+/** Thrown when a request exceeds its configured absolute timeout. */
 export class SnapReqTimeoutError extends SnapReqError {
   /**
    * @param {object} options - Error metadata.
@@ -82,5 +82,27 @@ export class SnapReqTimeoutError extends SnapReqError {
     this.method = method
     this.url = url
     this.timeoutMs = timeoutMs
+    /** @type {"overall" | "idle"} */
+    this.timeoutKind = "overall"
+  }
+}
+
+/** Thrown when an HTTP request makes no transport progress for its configured idle interval. */
+export class SnapReqIdleTimeoutError extends SnapReqTimeoutError {
+  /**
+   * @param {object} options - Error metadata.
+   * @param {string} options.method - HTTP method used for the request.
+   * @param {string} options.url - Fully resolved request URL.
+   * @param {number} options.idleTimeoutMs - Inactivity threshold in milliseconds.
+   * @param {import("./control.js").HttpRequestProgressPhase} options.phase - Last request phase to make progress.
+   */
+  constructor({method, url, idleTimeoutMs, phase}) {
+    super({method, url, timeoutMs: idleTimeoutMs})
+    this.message = `Request made no progress for ${idleTimeoutMs}ms during ${phase}: ${method} ${url}`
+    this.name = "SnapReqIdleTimeoutError"
+    /** @type {"idle"} */
+    this.timeoutKind = "idle"
+    this.idleTimeoutMs = idleTimeoutMs
+    this.phase = phase
   }
 }

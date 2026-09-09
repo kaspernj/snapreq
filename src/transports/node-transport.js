@@ -126,16 +126,19 @@ export default class NodeTransport {
 
     return await new Promise((resolve, reject) => {
       if (request.signal?.aborted) {
-        reject(new SnapReqAbortError())
+        reject(this._signalError(request.signal))
         return
       }
 
       let settled = false
+      /** @type {import("node:stream").Writable | null} */
+      let requestBodyWriter = null
       const abort = () => {
-        const error = new SnapReqAbortError()
+        const error = this._signalError(request.signal)
 
-        requestBody.stream?.unpipe(req)
+        if (requestBodyWriter) requestBody.stream?.unpipe(requestBodyWriter)
         if (requestBody.ownedStream) requestBody.stream?.destroy(error)
+        requestBodyWriter?.destroy(error)
         req.destroy(error)
       }
       const removeAbortListener = () => request.signal?.removeEventListener("abort", abort)
@@ -150,6 +153,11 @@ export default class NodeTransport {
           if (!settled) {
             settled = true
             removeAbortListener()
+            if (requestBodyWriter) requestBody.stream?.unpipe(requestBodyWriter)
+            if (requestBody.ownedStream) requestBody.stream?.destroy()
+            requestBodyWriter?.destroy()
+            res.destroy()
+            req.destroy()
             reject(error)
           }
 
@@ -159,11 +167,15 @@ export default class NodeTransport {
         // Re-point the abort listener at the response stream so aborting after
         // headers arrive tears down the body stream rather than the request.
         removeAbortListener()
+        let responseCancelled = false
         const cancelResponse = (/** @type {Error} */ error) => {
+          if (responseCancelled) return
+
+          responseCancelled = true
           responseStream.destroy(error)
           if (responseStream !== res) res.destroy(error)
         }
-        const abortStream = () => cancelResponse(new SnapReqAbortError())
+        const abortStream = () => cancelResponse(this._signalError(request.signal))
 
         request.signal?.addEventListener("abort", abortStream, {once: true})
         responseStream.on("close", () => request.signal?.removeEventListener("abort", abortStream))
@@ -179,7 +191,7 @@ export default class NodeTransport {
         }
 
         settled = true
-        resolve(new SnapReqResponse({
+        const response = new SnapReqResponse({
           url: request.url,
           method: request.method,
           status: res.statusCode,
@@ -188,12 +200,42 @@ export default class NodeTransport {
           stream: responseStream,
           nodeStream: responseStream,
           cancelBody: (error) => cancelResponse(/** @type {Error} */ (error))
-        }))
+        })
+
+        const finishErroredResponseBody = (/** @type {Error} */ error) => response._abortBody(error)
+        const finishErroredRawResponse = (/** @type {Error} */ error) => response._abortBody(error)
+        const finishPrematureResponseBody = () => {
+          if (res.complete || response._bodyDone) return
+
+          response._abortBody(Object.assign(
+            new Error(`Response closed before the complete body arrived: ${request.method} ${request.url}`),
+            {code: "ECONNRESET"}
+          ))
+        }
+
+        responseStream.once("error", finishErroredResponseBody)
+        responseStream.once("close", () => responseStream.removeListener("error", finishErroredResponseBody))
+        if (responseStream !== res) res.once("error", finishErroredRawResponse)
+        res.once("aborted", finishPrematureResponseBody)
+        res.once("close", () => {
+          res.removeListener("error", finishErroredRawResponse)
+          res.removeListener("aborted", finishPrematureResponseBody)
+          finishPrematureResponseBody()
+        })
+        resolve(response)
       })
 
       request.signal?.addEventListener("abort", abort, {once: true})
 
-      const onRequestBodyError = (/** @type {Error} */ error) => req.destroy(error)
+      const onRequestBodyError = (/** @type {Error} */ error) => {
+        req.destroy(error)
+
+        if (!settled) {
+          settled = true
+          removeAbortListener()
+          reject(error)
+        }
+      }
 
       requestBody.stream?.on("error", onRequestBodyError)
       if (requestBody.ownedStream) {
@@ -212,13 +254,52 @@ export default class NodeTransport {
       })
 
       if (requestBody.stream) {
-        requestBody.stream.pipe(req)
-      } else {
-        if (requestBody.buffer) req.write(requestBody.buffer)
+        const bodyWriter = this._requestBodyWriter(req, request.onProgress, stream)
 
-        req.end()
+        requestBodyWriter = bodyWriter
+        bodyWriter.on("error", onRequestBodyError)
+        bodyWriter.once("close", () => bodyWriter.removeListener("error", onRequestBodyError))
+        requestBody.stream.pipe(bodyWriter)
+      } else {
+        if (requestBody.buffer) {
+          req.end(requestBody.buffer, () => request.onProgress?.("request_body"))
+        } else {
+          req.end()
+        }
       }
     })
+  }
+
+  /**
+   * Builds the backpressure boundary for a streamed request body. Progress is
+   * reported only after Node accepts a chunk through `ClientRequest.write`.
+   * @param {import("node:http").ClientRequest} request - Destination HTTP request.
+   * @param {import("../snap-req.js").NormalizedRequest["onProgress"]} onProgress - Transport progress hook.
+   * @param {any} stream - The lazily imported node:stream module.
+   * @returns {import("node:stream").Writable} - Request-body destination.
+   */
+  _requestBodyWriter(request, onProgress, stream) {
+    return new stream.Writable({
+      write(chunk, encoding, callback) {
+        request.write(chunk, encoding, (error) => {
+          if (!error) onProgress?.("request_body")
+          callback(error)
+        })
+      },
+      final(callback) {
+        request.end(callback)
+      }
+    })
+  }
+
+  /**
+   * Preserves an internal timeout reason while keeping direct transport caller
+   * cancellation compatible with `SnapReqAbortError`.
+   * @param {AbortSignal | undefined} signal - Request abort signal.
+   * @returns {Error} - Stable request cancellation error.
+   */
+  _signalError(signal) {
+    return signal?.reason instanceof Error ? signal.reason : new SnapReqAbortError()
   }
 
   /**
@@ -312,7 +393,13 @@ export default class NodeTransport {
     let decoded = response
 
     for (let index = encodings.length - 1; index >= 0; index -= 1) {
-      decoded = decoded.pipe(this._responseDecoder(encodings[index], zlib))
+      const source = decoded
+      const decoder = this._responseDecoder(encodings[index], zlib)
+      const forwardError = (/** @type {Error} */ error) => decoder.destroy(error)
+
+      source.on("error", forwardError)
+      decoder.once("close", () => source.removeListener("error", forwardError))
+      decoded = source.pipe(decoder)
     }
 
     return decoded
