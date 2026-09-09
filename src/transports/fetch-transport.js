@@ -5,6 +5,8 @@ import {SnapReqAbortError, SnapReqUnsupportedFeatureError} from "../errors.js"
 import SnapReqHeaders from "../headers.js"
 import SnapReqResponse from "../response.js"
 
+const FETCH_NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
 /**
  * Transport backed by the `fetch` global. Works on web, Expo / React Native and
  * Node 18+. It cannot open Unix sockets, present client certificates or
@@ -88,6 +90,19 @@ export default class FetchTransport {
       if (error instanceof Error && error.name === "AbortError") throw new SnapReqAbortError()
 
       throw error
+    }
+
+    if (!fetchResponse.body && (request.method === "HEAD" || FETCH_NULL_BODY_STATUSES.has(fetchResponse.status))) {
+      finishBodyControl()
+
+      return new SnapReqResponse({
+        url: request.url,
+        method: request.method,
+        status: fetchResponse.status,
+        statusText: fetchResponse.statusText,
+        headers: this._responseHeaders(fetchResponse),
+        bytes: new Uint8Array(0)
+      })
     }
 
     if (

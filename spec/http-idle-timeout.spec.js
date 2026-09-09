@@ -7,6 +7,7 @@ import * as stream from "node:stream"
 import {HttpRequestControl} from "../src/control.js"
 import {SnapReqAbortError, SnapReqIdleTimeoutError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
 import SnapReq from "../src/snap-req.js"
+import FetchTransport from "../src/transports/fetch-transport.js"
 import NodeTransport from "../src/transports/node-transport.js"
 
 const delay = (/** @type {number} */ milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -249,6 +250,67 @@ describe("SnapReq HTTP idle timeout", () => {
       ).toThrow(SnapReqUnsupportedFeatureError)
     } finally {
       client.close()
+    }
+  })
+
+  for (const {description, method, status} of [
+    {description: "HEAD", method: "HEAD", status: 200},
+    {description: "204", method: "GET", status: 204}
+  ]) {
+    it(`accepts a bodyless Fetch ${description} response with an idle timeout`, async () => {
+      const originalFetch = globalThis.fetch
+      const caller = new AbortController()
+      /** @type {AbortSignal | undefined} */
+      let fetchSignal
+
+      globalThis.fetch = async (_url, init) => {
+        fetchSignal = init?.signal
+
+        return /** @type {Response} */ (/** @type {unknown} */ ({
+          arrayBuffer: async () => { throw new Error("A semantic bodyless response must not be buffered") },
+          body: null,
+          headers: {forEach: () => {}},
+          status,
+          statusText: ""
+        }))
+      }
+
+      const client = new SnapReq({idleTimeoutMs: 1000, timeoutMs: 0, transport: new FetchTransport()})
+
+      try {
+        const response = await client.request({method, path: "https://example.test/bodyless", signal: caller.signal})
+
+        expect(response.status).toBe(status)
+        expect(response.streamable).toBe(false)
+        expect((await response.bytes()).byteLength).toBe(0)
+
+        caller.abort()
+        expect(fetchSignal?.aborted).toBe(false)
+      } finally {
+        client.close()
+        globalThis.fetch = originalFetch
+      }
+    })
+  }
+
+  it("rejects a buffered non-bodyless Fetch response with an idle timeout", async () => {
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => /** @type {Response} */ (/** @type {unknown} */ ({
+      arrayBuffer: async () => new ArrayBuffer(0),
+      body: null,
+      headers: {forEach: () => {}},
+      status: 200,
+      statusText: "OK"
+    }))
+
+    const client = new SnapReq({idleTimeoutMs: 1000, timeoutMs: 0, transport: new FetchTransport()})
+
+    try {
+      await expect(() => client.get("https://example.test/buffered")).toThrow(SnapReqUnsupportedFeatureError)
+    } finally {
+      client.close()
+      globalThis.fetch = originalFetch
     }
   })
 

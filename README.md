@@ -88,7 +88,7 @@ await client.get("/slow", {timeoutMs: 5000})
 await client.get("/long-running", {timeoutMs: 0}) // disable the client default for this call
 ```
 
-The Node transport supports idle progress for streaming uploads. XHR uses its native upload/download progress events. Fetch supports idle timeouts for bodyless requests when its response exposes a `ReadableStream`; it explicitly rejects request-body uploads and buffered-response fallbacks whose progress Fetch cannot expose. The proxy-bounce transport explicitly rejects idle timeouts because it buffers the proxied response.
+The Node transport supports idle progress for streaming uploads. XHR uses its native upload/download progress events. Fetch supports semantically bodyless responses and observable `ReadableStream` downloads; it explicitly rejects request-body uploads and non-bodyless buffered-response fallbacks whose progress Fetch cannot expose. The proxy-bounce transport explicitly rejects idle timeouts because it buffers the proxied response.
 
 ### Retry
 
