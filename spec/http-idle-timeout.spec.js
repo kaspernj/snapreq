@@ -281,7 +281,6 @@ describe("SnapReq HTTP idle timeout", () => {
         const response = await client.request({method, path: "https://example.test/bodyless", signal: caller.signal})
 
         expect(response.status).toBe(status)
-        expect(response.streamable).toBe(false)
         expect((await response.bytes()).byteLength).toBe(0)
 
         caller.abort()
@@ -292,6 +291,33 @@ describe("SnapReq HTTP idle timeout", () => {
       }
     })
   }
+
+  it("streams an empty bodyless Fetch response through requestStream", async () => {
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => /** @type {Response} */ (/** @type {unknown} */ ({
+      arrayBuffer: async () => { throw new Error("A semantic bodyless response must not be buffered") },
+      body: null,
+      headers: {forEach: () => {}},
+      status: 204,
+      statusText: "No Content"
+    }))
+
+    const client = new SnapReq({transport: new FetchTransport()})
+
+    try {
+      const response = await client.requestStream({method: "GET", path: "https://example.test/bodyless"})
+      let streamedBytes = 0
+
+      for await (const chunk of response.stream()) streamedBytes += chunk.byteLength
+
+      expect(streamedBytes).toBe(0)
+      expect(response.streamable).toBe(false)
+    } finally {
+      client.close()
+      globalThis.fetch = originalFetch
+    }
+  })
 
   it("rejects a buffered non-bodyless Fetch response with an idle timeout", async () => {
     const originalFetch = globalThis.fetch
