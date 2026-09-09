@@ -40,6 +40,14 @@ export default class FetchTransport {
       throw new SnapReqUnsupportedFeatureError({feature: "request body compression", transport: "fetch"})
     }
 
+    if (request.idleTimeoutMs && request.idleTimeoutMs > 0 && request.body.kind !== "none") {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "idle timeouts for request bodies",
+        transport: "fetch",
+        detail: "fetch does not expose upload progress"
+      })
+    }
+
     /** @type {Record<string, any>} */
     const init = {
       method: request.method,
@@ -82,6 +90,22 @@ export default class FetchTransport {
       throw error
     }
 
+    if (
+      request.idleTimeoutMs &&
+      request.idleTimeoutMs > 0 &&
+      (!fetchResponse.body || typeof fetchResponse.body.getReader !== "function")
+    ) {
+      const error = new SnapReqUnsupportedFeatureError({
+        feature: "idle timeouts for buffered responses",
+        transport: "fetch",
+        detail: "this fetch implementation does not expose response progress"
+      })
+
+      bodyController.abort(error)
+      finishBodyControl()
+      throw error
+    }
+
     const responseStream = this._responseStream(fetchResponse, {
       cancel: (reason) => {
         bodyController.abort(reason)
@@ -97,7 +121,13 @@ export default class FetchTransport {
       statusText: fetchResponse.statusText,
       headers: this._responseHeaders(fetchResponse),
       stream: responseStream,
-      cancelBody: (error) => responseStream.cancel?.(error)
+      cancelBody: (error) => {
+        try {
+          responseStream.cancel?.(error)
+        } finally {
+          finishBodyControl()
+        }
+      }
     })
   }
 

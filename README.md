@@ -22,7 +22,7 @@ snapreq has **no barrel entry point** — you import each piece from its own sub
 ```js
 import SnapReq from "snapreq"                       // the HTTP client
 import SnapReqWebSocketClient from "snapreq/websocket"
-import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "snapreq/errors"
+import {SnapReqHttpError, SnapReqIdleTimeoutError, SnapReqUnsupportedFeatureError} from "snapreq/errors"
 import {defaultRetryableError} from "snapreq/retry"
 import SnapReqResponse from "snapreq/response"
 import SnapReqHeaders from "snapreq/headers"
@@ -63,7 +63,8 @@ new SnapReq({
   headers,        // default headers — object or a factory `() => ({...})` for dynamic auth
   retry,          // default retry policy (see below)
   throwOnError,   // throw SnapReqHttpError on non-2xx (default false)
-  timeoutMs,      // default request/body timeout in milliseconds; per-request 0 disables it
+  timeoutMs,      // absolute request/body deadline; per-request 0 disables it
+  idleTimeoutMs,  // inactivity timeout reset by transport progress; per-request 0 disables it
   credentials,    // fetch credentials mode: "omit" | "same-origin" | "include"
   transport,      // "auto" (default) | "node" | "fetch" | "xhr" | a transport instance
 
@@ -76,14 +77,18 @@ new SnapReq({
 
 ### Timeouts
 
-Set `timeoutMs` on the client or a single request to abort stalled requests. The timeout covers one request attempt, including response headers and body reads through `json()`, `text()`, `bytes()`, `buffer()`, or `stream()`. A timed-out request rejects with `SnapReqTimeoutError`; caller `signal` cancellation rejects with `SnapReqAbortError`. Both controls cooperatively abort the active transport and interrupt retry waits without starting another attempt.
+Set `timeoutMs` on the client or a single request for an absolute wall-clock deadline. It covers one request attempt, including response headers and body reads through `json()`, `text()`, `bytes()`, `buffer()`, or `stream()`, and is never reset by progress. Set `idleTimeoutMs` independently to bound inactivity while allowing a healthy transfer to exceed that interval. Its watchdog resets when outbound body bytes are accepted, response headers arrive, or inbound body bytes are delivered. Zero disables the corresponding client default.
+
+An absolute deadline rejects with `SnapReqTimeoutError` (`timeoutKind: "overall"`). Inactivity rejects with `SnapReqIdleTimeoutError`, a backward-compatible `SnapReqTimeoutError` subtype carrying `timeoutKind: "idle"`, `idleTimeoutMs`, and the last progress `phase`. Caller `signal` cancellation remains `SnapReqAbortError`. All controls abort the active transport and interrupt retry waits without starting another attempt.
 
 ```js
-const client = new SnapReq({baseUrl: "https://api.example.com", timeoutMs: 120000})
+const client = new SnapReq({baseUrl: "https://api.example.com", timeoutMs: 120000, idleTimeoutMs: 30000})
 
 await client.get("/slow", {timeoutMs: 5000})
 await client.get("/long-running", {timeoutMs: 0}) // disable the client default for this call
 ```
+
+The Node transport supports idle progress for streaming uploads. XHR uses its native upload/download progress events. Fetch supports idle timeouts for bodyless requests when its response exposes a `ReadableStream`; it explicitly rejects request-body uploads and buffered-response fallbacks whose progress Fetch cannot expose. The proxy-bounce transport explicitly rejects idle timeouts because it buffers the proxied response.
 
 ### Retry
 

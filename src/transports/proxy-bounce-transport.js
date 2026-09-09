@@ -72,6 +72,14 @@ export default class ProxyBounceTransport {
    * @returns {Promise<SnapReqResponse>} - The response.
    */
   async performRequest(request) {
+    if (request.idleTimeoutMs && request.idleTimeoutMs > 0) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "idle timeouts",
+        transport: "proxy-bounce",
+        detail: "the proxy response is buffered without transport progress events"
+      })
+    }
+
     const requestBody = request.body
 
     /** @type {string | null} */

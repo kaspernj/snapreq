@@ -5,8 +5,7 @@ import SnapReqHeaders from "./headers.js"
 import {buildUrl, normalizeBody} from "./request.js"
 import {normalizeRetryOptions, runWithRetry} from "./retry.js"
 import {selectTransport} from "./transports/select.js"
-import {runControlled} from "./control.js"
-import {TimeoutError} from "awaitery/build/timeout.js"
+import {HttpRequestControl} from "./control.js"
 
 /**
  * @typedef {import("./request.js").CompressionEncoding} CompressionEncoding
@@ -21,6 +20,8 @@ import {TimeoutError} from "awaitery/build/timeout.js"
  * @property {CompressionEncoding} bodyCompression - Request body compression.
  * @property {AbortSignal} [signal] - Abort signal.
  * @property {number} [timeoutMs] - Request timeout in milliseconds.
+ * @property {number} [idleTimeoutMs] - Request inactivity timeout in milliseconds.
+ * @property {(phase: import("./control.js").HttpRequestProgressPhase) => void} [onProgress] - Internal transport progress hook.
  * @property {string} [credentials] - Fetch credentials mode ("omit" | "same-origin" | "include").
  */
 
@@ -35,6 +36,7 @@ import {TimeoutError} from "awaitery/build/timeout.js"
  * @property {CompressionEncoding} [bodyCompression] - Compress the request body (Node transport only).
  * @property {AbortSignal} [signal] - Abort signal for the request.
  * @property {number} [timeoutMs] - Request timeout in milliseconds. Set to `0` to disable a client default.
+ * @property {number} [idleTimeoutMs] - Inactivity timeout in milliseconds. Set to `0` to disable a client default.
  * @property {string} [credentials] - Fetch credentials mode.
  * @property {boolean | import("./retry.js").RetryOptions} [retry] - Retry transient failures.
  * @property {boolean} [throwOnError] - Throw `SnapReqHttpError` on non-2xx responses.
@@ -57,15 +59,17 @@ export default class SnapReq {
    * @param {boolean | import("./retry.js").RetryOptions} [config.retry] - Default retry policy.
    * @param {boolean} [config.throwOnError] - Throw `SnapReqHttpError` on non-2xx responses by default. Defaults to false.
    * @param {number} [config.timeoutMs] - Default request timeout in milliseconds. Set per-request `timeoutMs: 0` to disable.
+   * @param {number} [config.idleTimeoutMs] - Default inactivity timeout in milliseconds. Set per-request `idleTimeoutMs: 0` to disable.
    * @param {string} [config.credentials] - Default fetch credentials mode.
    * @param {import("./transports/select.js").TransportName | import("./transports/select.js").Transport} [config.transport] - Transport preference or instance. Defaults to "auto".
    */
-  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, timeoutMs, credentials, transport = "auto"} = {}) {
+  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, timeoutMs, idleTimeoutMs, credentials, transport = "auto"} = {}) {
     this.baseUrl = baseUrl
     this.defaultHeaders = headers
     this.defaultRetry = retry
     this.throwOnError = throwOnError
     this.timeoutMs = timeoutMs
+    this.idleTimeoutMs = idleTimeoutMs
     this.credentials = credentials
     this._transportPreference = transport
     this._nodeConfig = {socketPath, tls, keepAlive}
@@ -117,6 +121,7 @@ export default class SnapReq {
       bodyCompression: options.bodyCompression || "identity",
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? this.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs ?? this.idleTimeoutMs,
       credentials: options.credentials ?? this.credentials
     }
   }
@@ -127,6 +132,21 @@ export default class SnapReq {
    * @returns {() => void} - Combined callback.
    */
   _chainBodyDone(existing, next) {
+    return () => {
+      try {
+        if (existing) existing()
+      } finally {
+        next()
+      }
+    }
+  }
+
+  /**
+   * @param {(() => void) | undefined} existing - Existing body-progress callback.
+   * @param {() => void} next - Callback to add.
+   * @returns {() => void} - Combined callback.
+   */
+  _chainBodyProgress(existing, next) {
     return () => {
       if (existing) existing()
       next()
@@ -154,7 +174,7 @@ export default class SnapReq {
         ? await runWithRetry(attempt, /** @type {any} */ (retry), options.signal)
         : await attempt()
     } catch (error) {
-      if (options.signal?.aborted) throw new SnapReqAbortError()
+      if (options.signal?.aborted && error === options.signal.reason) throw new SnapReqAbortError()
 
       throw error
     }
@@ -197,56 +217,48 @@ export default class SnapReq {
    */
   async _requestWithTimeout(options, performRequest) {
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
-    const startedAt = Date.now()
-    /** @type {NormalizedRequest} */
-    let normalized = this._normalize(options)
+    const idleTimeoutMs = options.idleTimeoutMs ?? this.idleTimeoutMs
+    const normalized = this._normalize(options)
+    const control = new HttpRequestControl({
+      idleTimeoutMs,
+      method: normalized.method,
+      signal: options.signal,
+      timeoutMs,
+      url: normalized.url
+    })
+
+    normalized.signal = control.signal
+    normalized.onProgress = (phase) => control.progress(phase)
 
     try {
-      const response = await runControlled({timeoutMs, signal: options.signal}, async (signal) => {
-        normalized = this._normalize({...options, signal})
-        return await performRequest(normalized)
-      })
+      control.signal.throwIfAborted()
+
+      const response = await control.run(() => performRequest(normalized))
 
       const mapBodyError = response._mapBodyError
 
       response._mapBodyError = (error) => {
-        if (options.signal?.aborted) return new SnapReqAbortError()
+        if (control.error) return control.error
 
         return mapBodyError ? mapBodyError(error) : error
       }
 
-      if (timeoutMs && timeoutMs > 0 && !response._bodyDone) {
-        const remaining = Math.max(1, timeoutMs - (Date.now() - startedAt))
-        /** @type {() => void} */
-        let finish
-        const bodyDone = new Promise((resolve) => { finish = () => resolve(undefined) })
+      response._onBodyProgress = this._chainBodyProgress(response._onBodyProgress, () => control.progress("response_body"))
+      response._onBodyDone = this._chainBodyDone(response._onBodyDone, () => control.finish())
+      control.progress("response_body")
+      control.setBodyCancellation((error) => response._abortBody(error))
 
-        response._onBodyDone = this._chainBodyDone(response._onBodyDone, finish)
-        void runControlled({timeoutMs: remaining, signal: options.signal}, () => bodyDone).catch((error) => {
-          response._abortBody(this._requestControlError(error, normalized, timeoutMs, options.signal))
-        })
-      }
+      if (response._bodyDone) control.finish()
+      if (control.error) throw control.error
 
       return response
     } catch (error) {
-      throw this._requestControlError(error, normalized, timeoutMs, options.signal)
-    }
-  }
+      const requestError = control.error || error
 
-  /**
-   * @param {unknown} error - Awaitery/transport error.
-   * @param {NormalizedRequest} request - Request metadata.
-   * @param {number | undefined} timeoutMs - Attempt timeout.
-   * @param {AbortSignal | undefined} callerSignal - Caller cancellation.
-   * @returns {unknown} - Stable public Snapreq error.
-   */
-  _requestControlError(error, request, timeoutMs, callerSignal) {
-    if (callerSignal?.aborted) return new SnapReqAbortError()
-    if (error instanceof TimeoutError && timeoutMs) {
-      return new SnapReqTimeoutError({method: request.method, url: request.url, timeoutMs})
-    }
+      control.finish()
 
-    return error
+      throw requestError
+    }
   }
 
   /**
@@ -308,7 +320,7 @@ export default class SnapReq {
     try {
       responseText = await response.text()
     } catch (error) {
-      if (error instanceof SnapReqTimeoutError) throw error
+      if (error instanceof SnapReqTimeoutError || error instanceof SnapReqAbortError) throw error
 
       // Body unavailable (already streamed or read error) — fall back to status text.
     }
