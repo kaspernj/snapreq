@@ -296,23 +296,26 @@ describe("SnapReq HTTP idle timeout", () => {
     expect(requestError.message).toMatch(/^Request made no progress for 40ms during connect_or_headers: GET /)
   })
 
-  it("classifies inactivity while reading a response body", async () => {
-    const client = new SnapReq({baseUrl, transport: "node"})
-    const response = await client.get("/stalled-response", {idleTimeoutMs: 40, timeoutMs: 0})
-    let responseError
+  for (const transport of ["node", "fetch"]) {
+    it(`classifies inactivity while reading a ${transport} response body`, async () => {
+      const client = new SnapReq({baseUrl, transport: /** @type {any} */ (transport)})
+      const response = await client.get("/stalled-response", {idleTimeoutMs: 40, timeoutMs: 0})
+      let responseError
 
-    try {
-      await response.text()
-    } catch (error) {
-      responseError = error
-    } finally {
-      client.close()
-    }
+      try {
+        await response.text()
+      } catch (error) {
+        responseError = error
+      } finally {
+        client.close()
+      }
 
-    expect(responseError).toBeInstanceOf(SnapReqIdleTimeoutError)
-    expect(responseError.phase).toBe("response_body")
-    expect(response.nodeStream?.destroyed).toBe(true)
-  })
+      expect(responseError).toBeInstanceOf(SnapReqIdleTimeoutError)
+      expect(responseError.phase).toBe("response_body")
+
+      if (transport === "node") expect(response.nodeStream?.destroyed).toBe(true)
+    })
+  }
 
   for (const path of ["/invalid-gzip", "/premature-response"]) {
     it(`reports the ${path.slice(1)} stream failure before the idle timeout`, async () => {

@@ -153,8 +153,11 @@ export class HttpRequestControl {
     this.error = error
     this._active = false
     this._cleanup()
-    this._controller.abort(error)
-    cancelBody?.(error)
+    try {
+      cancelBody?.(error)
+    } finally {
+      this._controller.abort(error)
+    }
   }
 
   /** @returns {void} */
