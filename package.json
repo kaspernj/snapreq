@@ -45,15 +45,15 @@
     "awaitery": "1.0.19"
   },
   "devDependencies": {
-    "@velocious/testing": "0.0.0",
     "@eslint/js": "^10.0.1",
     "@kaspernj/hermes-compose": "0.0.0",
     "@types/node": "^26.0.1",
     "@types/ws": "^8.18.1",
+    "@velocious/testing": "0.0.0",
     "eslint": "^10.3.0",
     "eslint-plugin-jsdoc": "^63.0.0",
     "globals": "^17.6.0",
-    "release-patch": "^1.0.0",
+    "release-patch": "^1.0.9",
     "typescript": "^7.0.2",
     "ws": "^8.21.0"
   }
