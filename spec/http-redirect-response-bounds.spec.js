@@ -2,7 +2,13 @@
 
 import {afterAll, beforeAll, describe, expect, it} from "@velocious/testing"
 import http from "node:http"
+import {SnapReqHttpError, SnapReqUnsupportedFeatureError} from "../src/errors.js"
+import SnapReqHeaders from "../src/headers.js"
+import SnapReqResponse from "../src/response.js"
 import SnapReq from "../src/snap-req.js"
+import FetchTransport from "../src/transports/fetch-transport.js"
+import ProxyBounceTransport from "../src/transports/proxy-bounce-transport.js"
+import XhrTransport from "../src/transports/xhr-transport.js"
 
 /**
  * Starts the redirect/response-bound fixtures.
@@ -37,6 +43,12 @@ async function startServers() {
     } else if (url.pathname === "/loop") {
       response.writeHead(302, {Location: "/loop"})
       response.end()
+    } else if (url.pathname === "/redirect-to-error") {
+      response.writeHead(303, {Location: "/redirect-error"})
+      response.end()
+    } else if (url.pathname === "/redirect-error") {
+      response.writeHead(503, {"Content-Type": "text/plain"})
+      response.end("unavailable")
     } else if (url.pathname === "/declared-large") {
       response.writeHead(200, {"Content-Length": "9", "Content-Type": "text/plain"})
       response.end("123456789")
@@ -104,6 +116,30 @@ describe("SnapReq redirects and response bounds", () => {
       client.close()
     }
   })
+
+  for (const redirect of ["manual", "follow"]) {
+    it(`rejects ${redirect} when browser Fetch hides the redirect response`, async () => {
+      const originalFetch = globalThis.fetch
+
+      globalThis.fetch = async () => /** @type {Response} */ (/** @type {unknown} */ ({
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+        headers: {forEach: () => {}},
+        status: 0,
+        statusText: "",
+        type: "opaqueredirect"
+      }))
+
+      const client = new SnapReq({redirect: /** @type {"manual" | "follow"} */ (redirect), transport: new FetchTransport()})
+
+      try {
+        await expect(() => client.get("https://example.test/redirect")).toThrow(SnapReqUnsupportedFeatureError)
+      } finally {
+        client.close()
+        globalThis.fetch = originalFetch
+      }
+    })
+  }
 
   for (const transport of ["node", "fetch"]) {
     it(`implements explicit same-origin redirects over ${transport}`, async () => {
@@ -182,6 +218,60 @@ describe("SnapReq redirects and response bounds", () => {
     expect(redirectError?.message).toMatch(/maximum of 2/i)
   })
 
+  it("reports the final method and URL when a followed redirect fails", async () => {
+    const client = new SnapReq({baseUrl: servers.sourceUrl, redirect: "follow", throwOnError: true, transport: "node"})
+    /** @type {SnapReqHttpError | undefined} */
+    let responseError
+
+    try {
+      await client.post("/redirect-to-error", "request body")
+    } catch (error) {
+      if (error instanceof SnapReqHttpError) responseError = error
+    } finally {
+      client.close()
+    }
+
+    expect(responseError).toBeInstanceOf(SnapReqHttpError)
+    expect(responseError?.method).toBe("GET")
+    expect(responseError?.url).toBe(`${servers.sourceUrl}/redirect-error`)
+    expect(responseError?.message).toBe(`HTTP 503 GET ${servers.sourceUrl}/redirect-error: unavailable`)
+  })
+
+  it("reports header progress for every redirect hop", async () => {
+    const client = new SnapReq()
+    const request = client._normalize({method: "GET", path: "https://example.test/first", redirect: "follow"})
+    const progress = []
+    const responses = [
+      new SnapReqResponse({
+        bytes: new Uint8Array(0),
+        headers: new SnapReqHeaders({Location: "/second"}),
+        method: "GET",
+        status: 302,
+        url: "https://example.test/first"
+      }),
+      new SnapReqResponse({
+        bytes: new Uint8Array(0),
+        headers: new SnapReqHeaders({Location: "/final"}),
+        method: "GET",
+        status: 307,
+        url: "https://example.test/second"
+      }),
+      new SnapReqResponse({
+        bytes: new Uint8Array(0),
+        method: "GET",
+        status: 200,
+        url: "https://example.test/final"
+      })
+    ]
+
+    request.onProgress = (phase) => progress.push(phase)
+
+    const response = await client._performWithRedirects(request, async () => /** @type {SnapReqResponse} */ (responses.shift()))
+
+    expect(response.url).toBe("https://example.test/final")
+    expect(progress).toEqual(["connect_or_headers", "connect_or_headers", "connect_or_headers"])
+  })
+
   for (const path of ["/declared-large", "/chunked-large"]) {
     it(`rejects ${path.slice(1)} buffered responses above maxResponseBytes`, async () => {
       const client = new SnapReq({baseUrl: servers.sourceUrl, maxResponseBytes: 8, transport: "node"})
@@ -201,6 +291,77 @@ describe("SnapReq redirects and response bounds", () => {
       expect(responseError?.message).toMatch(/8 bytes/)
     })
   }
+
+  it("rejects bounded Fetch responses before fallback buffering", async () => {
+    const originalFetch = globalThis.fetch
+    let arrayBufferCalls = 0
+
+    globalThis.fetch = async () => /** @type {Response} */ (/** @type {unknown} */ ({
+      arrayBuffer: async () => {
+        arrayBufferCalls += 1
+        return new ArrayBuffer(16)
+      },
+      body: null,
+      headers: {forEach: () => {}},
+      status: 200,
+      statusText: "OK",
+      type: "basic"
+    }))
+
+    const client = new SnapReq({maxResponseBytes: 8, transport: new FetchTransport()})
+
+    try {
+      await expect(() => client.get("https://example.test/buffered")).toThrow(SnapReqUnsupportedFeatureError)
+      expect(arrayBufferCalls).toBe(0)
+    } finally {
+      client.close()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it("rejects bounded XHR responses before allocating an XMLHttpRequest", async () => {
+    const originalXmlHttpRequest = globalThis.XMLHttpRequest
+    let constructorCalls = 0
+
+    globalThis.XMLHttpRequest = /** @type {typeof XMLHttpRequest} */ (class {
+      constructor() {
+        constructorCalls += 1
+      }
+    })
+
+    const client = new SnapReq({maxResponseBytes: 8, transport: new XhrTransport()})
+
+    try {
+      await expect(() => client.get("https://example.test/buffered")).toThrow(SnapReqUnsupportedFeatureError)
+      expect(constructorCalls).toBe(0)
+    } finally {
+      client.close()
+      globalThis.XMLHttpRequest = originalXmlHttpRequest
+    }
+  })
+
+  it("rejects bounded proxy-bounce responses before contacting the proxy", async () => {
+    const originalFetch = globalThis.fetch
+    let fetchCalls = 0
+
+    globalThis.fetch = async () => {
+      fetchCalls += 1
+      throw new Error("The proxy must not be contacted")
+    }
+
+    const client = new SnapReq({
+      maxResponseBytes: 8,
+      transport: new ProxyBounceTransport({proxyUrl: "https://proxy.example.test/request"})
+    })
+
+    try {
+      await expect(() => client.get("https://example.test/buffered")).toThrow(SnapReqUnsupportedFeatureError)
+      expect(fetchCalls).toBe(0)
+    } finally {
+      client.close()
+      globalThis.fetch = originalFetch
+    }
+  })
 
   it("allows a request-level response bound to override the client default", async () => {
     const client = new SnapReq({baseUrl: servers.sourceUrl, maxResponseBytes: 4, transport: "node"})

@@ -20,7 +20,8 @@ async function* completedByteStream(bytes) {
  * Node 18+. It cannot open Unix sockets, present client certificates or
  * compress request bodies — those raise `SnapReqUnsupportedFeatureError`.
  * Response streaming uses `response.body` where available and otherwise buffers
- * the body once, keeping the same stream interface everywhere.
+ * the body once. Explicit response bounds reject that buffered fallback because
+ * Fetch provides no incremental bytes to count.
  */
 export default class FetchTransport {
   /** @returns {string} - Transport name. */
@@ -107,12 +108,12 @@ export default class FetchTransport {
       throw new SnapReqRedirectError({location: null, policy: "error", status: 0, url: request.url})
     }
 
-    if (fetchResponse.type === "opaqueredirect" && request.redirect === "follow") {
+    if (fetchResponse.type === "opaqueredirect" && request.redirect) {
       finishBodyControl()
       throw new SnapReqUnsupportedFeatureError({
-        feature: "cross-origin redirect following",
+        feature: `explicit redirect policy "${request.redirect}"`,
         transport: "fetch",
-        detail: "manual Fetch redirects do not expose the target URL or headers"
+        detail: "this Fetch implementation hides manual redirect status, target URL and headers"
       })
     }
 
@@ -129,6 +130,21 @@ export default class FetchTransport {
         bytes,
         stream: completedByteStream(bytes)
       })
+    }
+
+    if (
+      request.maxResponseBytes !== undefined &&
+      (!fetchResponse.body || typeof fetchResponse.body.getReader !== "function")
+    ) {
+      const error = new SnapReqUnsupportedFeatureError({
+        feature: "bounded buffered responses",
+        transport: "fetch",
+        detail: "this Fetch implementation does not expose a readable response stream"
+      })
+
+      bodyController.abort(error)
+      finishBodyControl()
+      throw error
     }
 
     if (

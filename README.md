@@ -86,7 +86,11 @@ is security-sensitive: `manual` exposes the 3xx response, `error` raises
 `SnapReqRedirectError`, and `follow` follows at most `maxRedirects` responses.
 Follow mode removes `Authorization`, `Cookie`, and `Proxy-Authorization` when
 the redirect changes origin while retaining non-credential headers such as
-`Range`. XHR and the proxy-bounce adapter raise
+`Range`. Fetch implementations that expose manual redirect responses support
+all three policies. Browser Fetch commonly returns an opaque redirect instead;
+in that case `error` still rejects the redirect, while `manual` and `follow`
+raise `SnapReqUnsupportedFeatureError` because the status, target URL, and
+headers required to implement them safely are hidden. XHR and the proxy-bounce adapter raise
 `SnapReqUnsupportedFeatureError` because those transports cannot observe the
 target redirect response reliably.
 
@@ -96,6 +100,11 @@ or retained by `bytes()`, `text()`, `json()`, and `buffer()`. A declared
 compressed responses are counted as decoded chunks and raise
 `SnapReqResponseTooLargeError` on overflow. The limit can be set on the client
 or overridden per request; omission keeps the existing unlimited behavior.
+The Node transport and Fetch implementations with a readable response stream
+enforce the bound incrementally. Fetch buffered fallbacks, XHR, and
+proxy-bounce reject a configured bound with `SnapReqUnsupportedFeatureError`
+because they allocate or receive a complete buffered response before SnapReq
+can count it.
 
 ### Timeouts
 

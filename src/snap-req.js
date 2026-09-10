@@ -230,7 +230,7 @@ export default class SnapReq {
       throw error
     }
 
-    if (throwOnError && !response.ok) throw await this._httpError(response, this._normalize(options))
+    if (throwOnError && !response.ok) throw await this._httpError(response)
 
     return response
   }
@@ -255,7 +255,7 @@ export default class SnapReq {
     const response = await this._requestWithTimeout(options, (request) => transport.performRequest(request))
 
     if ((options.throwOnError ?? this.throwOnError) && !response.ok) {
-      throw await this._httpError(response, this._normalize(options))
+      throw await this._httpError(response)
     }
 
     return response
@@ -326,6 +326,8 @@ export default class SnapReq {
 
     while (true) {
       const response = await performRequest(request)
+
+      request.onProgress?.("connect_or_headers")
 
       if (!request.redirect || request.redirect === "manual" || !this._isRedirectResponse(response.status)) return response
 
@@ -465,10 +467,9 @@ export default class SnapReq {
 
   /**
    * @param {import("./response.js").default} response - The failed response.
-   * @param {NormalizedRequest} request - The request that produced it.
    * @returns {Promise<SnapReqHttpError>} - An error describing the failure.
    */
-  async _httpError(response, request) {
+  async _httpError(response) {
     let responseText = ""
 
     try {
@@ -482,9 +483,9 @@ export default class SnapReq {
     const detail = responseText || response.statusText || ""
 
     return new SnapReqHttpError({
-      message: `HTTP ${response.status} ${request.method} ${request.url}${detail ? `: ${detail}` : ""}`,
-      method: request.method,
-      url: request.url,
+      message: `HTTP ${response.status} ${response.method} ${response.url}${detail ? `: ${detail}` : ""}`,
+      method: response.method,
+      url: response.url,
       status: response.status,
       statusText: response.statusText,
       responseText,

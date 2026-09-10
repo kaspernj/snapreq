@@ -88,6 +88,14 @@ export default class ProxyBounceTransport {
       })
     }
 
+    if (request.maxResponseBytes !== undefined) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "bounded responses",
+        transport: "proxy-bounce",
+        detail: "the remote proxy buffers the complete target response"
+      })
+    }
+
     const requestBody = request.body
 
     /** @type {string | null} */
