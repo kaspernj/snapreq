@@ -1,6 +1,6 @@
 // @ts-check
 
-import {SnapReqAbortError, SnapReqHttpError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "./errors.js"
+import {SnapReqAbortError, SnapReqHttpError, SnapReqRedirectError, SnapReqResponseTooLargeError, SnapReqTimeoutError, SnapReqUnsupportedFeatureError} from "./errors.js"
 import SnapReqHeaders from "./headers.js"
 import {buildUrl, normalizeBody} from "./request.js"
 import {normalizeRetryOptions, runWithRetry} from "./retry.js"
@@ -10,6 +10,8 @@ import {HttpRequestControl} from "./control.js"
 /**
  * @typedef {import("./request.js").CompressionEncoding} CompressionEncoding
  */
+
+/** @typedef {"error" | "follow" | "manual"} RedirectPolicy */
 
 /**
  * @typedef {object} NormalizedRequest
@@ -23,6 +25,9 @@ import {HttpRequestControl} from "./control.js"
  * @property {number} [idleTimeoutMs] - Request inactivity timeout in milliseconds.
  * @property {(phase: import("./control.js").HttpRequestProgressPhase) => void} [onProgress] - Internal transport progress hook.
  * @property {string} [credentials] - Fetch credentials mode ("omit" | "same-origin" | "include").
+ * @property {RedirectPolicy} [redirect] - Explicit redirect policy; omission keeps transport-native behavior.
+ * @property {number} maxRedirects - Maximum followed redirects.
+ * @property {number} [maxResponseBytes] - Maximum decoded response bytes that may be consumed.
  */
 
 /**
@@ -40,6 +45,9 @@ import {HttpRequestControl} from "./control.js"
  * @property {string} [credentials] - Fetch credentials mode.
  * @property {boolean | import("./retry.js").RetryOptions} [retry] - Retry transient failures.
  * @property {boolean} [throwOnError] - Throw `SnapReqHttpError` on non-2xx responses.
+ * @property {RedirectPolicy} [redirect] - Explicit redirect policy; omission keeps transport-native behavior.
+ * @property {number} [maxRedirects] - Maximum followed redirects. Defaults to 10.
+ * @property {number} [maxResponseBytes] - Maximum decoded response bytes that may be consumed.
  */
 
 /**
@@ -62,8 +70,14 @@ export default class SnapReq {
    * @param {number} [config.idleTimeoutMs] - Default inactivity timeout in milliseconds. Set per-request `idleTimeoutMs: 0` to disable.
    * @param {string} [config.credentials] - Default fetch credentials mode.
    * @param {import("./transports/select.js").TransportName | import("./transports/select.js").Transport} [config.transport] - Transport preference or instance. Defaults to "auto".
+   * @param {RedirectPolicy} [config.redirect] - Explicit redirect policy; omission keeps transport-native behavior.
+   * @param {number} [config.maxRedirects] - Maximum followed redirects. Defaults to 10.
+   * @param {number} [config.maxResponseBytes] - Maximum decoded response bytes that may be consumed.
    */
-  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, timeoutMs, idleTimeoutMs, credentials, transport = "auto"} = {}) {
+  constructor({baseUrl, socketPath, tls, keepAlive = true, headers, retry, throwOnError = false, timeoutMs, idleTimeoutMs, credentials, transport = "auto", redirect, maxRedirects = 10, maxResponseBytes} = {}) {
+    this._validateRedirectPolicy(redirect)
+    this._validateByteLimit(maxRedirects, "maxRedirects")
+    this._validateByteLimit(maxResponseBytes, "maxResponseBytes", true)
     this.baseUrl = baseUrl
     this.defaultHeaders = headers
     this.defaultRetry = retry
@@ -71,12 +85,38 @@ export default class SnapReq {
     this.timeoutMs = timeoutMs
     this.idleTimeoutMs = idleTimeoutMs
     this.credentials = credentials
+    this.redirect = redirect
+    this.maxRedirects = maxRedirects
+    this.maxResponseBytes = maxResponseBytes
     this._transportPreference = transport
     this._nodeConfig = {socketPath, tls, keepAlive}
     /** @type {Promise<import("./transports/select.js").Transport> | null} */
     this._transportPromise = null
     /** @type {import("./transports/select.js").Transport | null} */
     this._transport = null
+  }
+
+  /**
+   * @param {RedirectPolicy | undefined} redirect - Redirect policy.
+   * @returns {void}
+   */
+  _validateRedirectPolicy(redirect) {
+    if (redirect !== undefined && !["error", "follow", "manual"].includes(redirect)) {
+      throw new TypeError(`redirect must be "error", "follow" or "manual", got: ${redirect}`)
+    }
+  }
+
+  /**
+   * @param {number | undefined} value - Integer option.
+   * @param {string} name - Option name.
+   * @param {boolean} [allowZero] - Whether zero is accepted.
+   * @returns {void}
+   */
+  _validateByteLimit(value, name, allowZero = false) {
+    if (value === undefined) return
+    if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
+      throw new TypeError(`${name} must be a ${allowZero ? "non-negative" : "positive"} safe integer, got: ${value}`)
+    }
   }
 
   /** @returns {Promise<import("./transports/select.js").Transport>} - The resolved transport. */
@@ -104,6 +144,14 @@ export default class SnapReq {
    * @returns {NormalizedRequest} - The normalized request.
    */
   _normalize(options) {
+    const redirect = options.redirect ?? this.redirect
+    const maxRedirects = options.maxRedirects ?? this.maxRedirects
+    const maxResponseBytes = options.maxResponseBytes ?? this.maxResponseBytes
+
+    this._validateRedirectPolicy(redirect)
+    this._validateByteLimit(maxRedirects, "maxRedirects")
+    this._validateByteLimit(maxResponseBytes, "maxResponseBytes", true)
+
     const headers = new SnapReqHeaders()
     const defaults = typeof this.defaultHeaders === "function" ? this.defaultHeaders() : this.defaultHeaders
 
@@ -122,7 +170,10 @@ export default class SnapReq {
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? this.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs ?? this.idleTimeoutMs,
-      credentials: options.credentials ?? this.credentials
+      credentials: options.credentials ?? this.credentials,
+      redirect,
+      maxRedirects,
+      maxResponseBytes
     }
   }
 
@@ -179,7 +230,7 @@ export default class SnapReq {
       throw error
     }
 
-    if (throwOnError && !response.ok) throw await this._httpError(response, this._normalize(options))
+    if (throwOnError && !response.ok) throw await this._httpError(response)
 
     return response
   }
@@ -204,7 +255,7 @@ export default class SnapReq {
     const response = await this._requestWithTimeout(options, (request) => transport.performRequest(request))
 
     if ((options.throwOnError ?? this.throwOnError) && !response.ok) {
-      throw await this._httpError(response, this._normalize(options))
+      throw await this._httpError(response)
     }
 
     return response
@@ -233,7 +284,9 @@ export default class SnapReq {
     try {
       control.signal.throwIfAborted()
 
-      const response = await control.run(() => performRequest(normalized))
+      const response = await control.run(() => this._performWithRedirects(normalized, performRequest))
+
+      response._setMaxResponseBytes(normalized.maxResponseBytes)
 
       const mapBodyError = response._mapBodyError
 
@@ -258,6 +311,109 @@ export default class SnapReq {
       control.finish()
 
       throw requestError
+    }
+  }
+
+  /**
+   * Performs the transport requests required by one explicit redirect policy.
+   * @param {NormalizedRequest} initialRequest - Initial normalized request.
+   * @param {(request: NormalizedRequest) => Promise<import("./response.js").default>} performRequest - Single-request transport runner.
+   * @returns {Promise<import("./response.js").default>} - Final or manually exposed response.
+   */
+  async _performWithRedirects(initialRequest, performRequest) {
+    let request = initialRequest
+    let followedRedirects = 0
+
+    while (true) {
+      const response = await performRequest(request)
+
+      request.onProgress?.("connect_or_headers")
+
+      if (!request.redirect || request.redirect === "manual" || !this._isRedirectResponse(response.status)) return response
+
+      const location = response.headers.get("location")
+
+      if (request.redirect === "error") {
+        const error = new SnapReqRedirectError({location, policy: "error", status: response.status, url: response.url})
+
+        response._abortBody(error)
+        throw error
+      }
+
+      if (!location) {
+        const error = new SnapReqRedirectError({location, policy: "follow", status: response.status, url: response.url})
+
+        response._abortBody(error)
+        throw error
+      }
+
+      if (followedRedirects >= request.maxRedirects) {
+        const error = new SnapReqRedirectError({
+          location,
+          maxRedirects: request.maxRedirects,
+          policy: "follow",
+          status: response.status,
+          url: response.url
+        })
+
+        response._abortBody(error)
+        throw error
+      }
+
+      const nextUrl = new URL(location, response.url)
+
+      if (!new Set(["http:", "https:"]).has(nextUrl.protocol)) {
+        const error = new SnapReqRedirectError({location, policy: "follow", status: response.status, url: response.url})
+
+        response._abortBody(error)
+        throw error
+      }
+
+      response._abortBody(new SnapReqRedirectError({location, policy: "follow", status: response.status, url: response.url}))
+      const nextRequest = this._redirectedRequest(request, response.status, nextUrl)
+
+      followedRedirects += 1
+      request = nextRequest
+    }
+  }
+
+  /**
+   * @param {number} status - HTTP status.
+   * @returns {boolean} - Whether it is a redirect status.
+   */
+  _isRedirectResponse(status) {
+    return [301, 302, 303, 307, 308].includes(status)
+  }
+
+  /**
+   * @param {NormalizedRequest} request - Previous request.
+   * @param {number} status - Redirect response status.
+   * @param {URL} nextUrl - Resolved redirect target.
+   * @returns {NormalizedRequest} - Redirected request.
+   */
+  _redirectedRequest(request, status, nextUrl) {
+    const headers = new SnapReqHeaders(request.headers)
+    const previousUrl = new URL(request.url)
+    const changesToGet = status === 303 && request.method !== "HEAD" || [301, 302].includes(status) && request.method === "POST"
+
+    if (previousUrl.origin !== nextUrl.origin) {
+      for (const name of ["Authorization", "Cookie", "Proxy-Authorization"]) headers.delete(name)
+    }
+
+    if (changesToGet) {
+      for (const name of ["Content-Encoding", "Content-Length", "Content-Type"]) headers.delete(name)
+    } else if (request.body.kind === "stream") {
+      throw new SnapReqRedirectError({location: nextUrl.href, policy: "follow", status, url: request.url})
+    }
+
+    return {
+      ...request,
+      body: changesToGet ? {kind: "none", value: null} : request.body,
+      bodyCompression: changesToGet ? "identity" : request.bodyCompression,
+      credentials: previousUrl.origin === nextUrl.origin ? request.credentials : "omit",
+      headers,
+      method: changesToGet ? "GET" : request.method,
+      url: nextUrl.href
     }
   }
 
@@ -311,16 +467,15 @@ export default class SnapReq {
 
   /**
    * @param {import("./response.js").default} response - The failed response.
-   * @param {NormalizedRequest} request - The request that produced it.
    * @returns {Promise<SnapReqHttpError>} - An error describing the failure.
    */
-  async _httpError(response, request) {
+  async _httpError(response) {
     let responseText = ""
 
     try {
       responseText = await response.text()
     } catch (error) {
-      if (error instanceof SnapReqTimeoutError || error instanceof SnapReqAbortError) throw error
+      if (error instanceof SnapReqTimeoutError || error instanceof SnapReqAbortError || error instanceof SnapReqResponseTooLargeError) throw error
 
       // Body unavailable (already streamed or read error) — fall back to status text.
     }
@@ -328,9 +483,9 @@ export default class SnapReq {
     const detail = responseText || response.statusText || ""
 
     return new SnapReqHttpError({
-      message: `HTTP ${response.status} ${request.method} ${request.url}${detail ? `: ${detail}` : ""}`,
-      method: request.method,
-      url: request.url,
+      message: `HTTP ${response.status} ${response.method} ${response.url}${detail ? `: ${detail}` : ""}`,
+      method: response.method,
+      url: response.url,
       status: response.status,
       statusText: response.statusText,
       responseText,

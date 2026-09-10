@@ -9,6 +9,8 @@ import SnapReqResponse from "../response.js"
  * Transport backed by `XMLHttpRequest`. A fallback for web environments that
  * lack `fetch`. Buffers the whole response (no incremental streaming) and, like
  * `fetch`, cannot do Unix sockets, client TLS or request-body compression.
+ * Explicit response bounds are rejected because XHR exposes bytes only after
+ * allocating the complete response.
  */
 export default class XhrTransport {
   /** @returns {string} - Transport name. */
@@ -31,12 +33,28 @@ export default class XhrTransport {
    * @returns {Promise<SnapReqResponse>} - The response.
    */
   performRequest(request) {
+    if (request.redirect) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "explicit redirect policies",
+        transport: "xhr",
+        detail: "XMLHttpRequest does not expose redirect responses"
+      })
+    }
+
     if (request.bodyCompression && request.bodyCompression !== "identity") {
       throw new SnapReqUnsupportedFeatureError({feature: "request body compression", transport: "xhr"})
     }
 
     if (request.body.kind === "stream") {
       throw new SnapReqUnsupportedFeatureError({feature: "streamed request bodies", transport: "xhr"})
+    }
+
+    if (request.maxResponseBytes !== undefined) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "bounded responses",
+        transport: "xhr",
+        detail: "XMLHttpRequest buffers the complete response before exposing it"
+      })
     }
 
     return new Promise((resolve, reject) => {

@@ -22,7 +22,7 @@ snapreq has **no barrel entry point** — you import each piece from its own sub
 ```js
 import SnapReq from "snapreq"                       // the HTTP client
 import SnapReqWebSocketClient from "snapreq/websocket"
-import {SnapReqHttpError, SnapReqIdleTimeoutError, SnapReqUnsupportedFeatureError} from "snapreq/errors"
+import {SnapReqHttpError, SnapReqIdleTimeoutError, SnapReqRedirectError, SnapReqResponseTooLargeError, SnapReqUnsupportedFeatureError} from "snapreq/errors"
 import {defaultRetryableError} from "snapreq/retry"
 import SnapReqResponse from "snapreq/response"
 import SnapReqHeaders from "snapreq/headers"
@@ -66,6 +66,9 @@ new SnapReq({
   timeoutMs,      // absolute request/body deadline; per-request 0 disables it
   idleTimeoutMs,  // inactivity timeout reset by transport progress; per-request 0 disables it
   credentials,    // fetch credentials mode: "omit" | "same-origin" | "include"
+  redirect,       // explicit "error" | "manual" | "follow"; omitted keeps transport behavior
+  maxRedirects,   // followed-redirect maximum (default 10)
+  maxResponseBytes, // decoded response-body limit; omitted means unlimited
   transport,      // "auto" (default) | "node" | "fetch" | "xhr" | a transport instance
 
   // Node transport only:
@@ -74,6 +77,34 @@ new SnapReq({
   keepAlive       // reuse connections (default true)
 })
 ```
+
+### Redirects and response bounds
+
+Redirect behavior remains transport-native when `redirect` is omitted, which
+preserves existing applications. Set an explicit policy when redirect handling
+is security-sensitive: `manual` exposes the 3xx response, `error` raises
+`SnapReqRedirectError`, and `follow` follows at most `maxRedirects` responses.
+Follow mode removes `Authorization`, `Cookie`, and `Proxy-Authorization` when
+the redirect changes origin while retaining non-credential headers such as
+`Range`. Fetch implementations that expose manual redirect responses support
+all three policies. Browser Fetch commonly returns an opaque redirect instead;
+in that case `error` still rejects the redirect, while `manual` and `follow`
+raise `SnapReqUnsupportedFeatureError` because the status, target URL, and
+headers required to implement them safely are hidden. XHR and the proxy-bounce adapter raise
+`SnapReqUnsupportedFeatureError` because those transports cannot observe the
+target redirect response reliably.
+
+`maxResponseBytes` bounds decoded bytes before they are returned by `stream()`
+or retained by `bytes()`, `text()`, `json()`, and `buffer()`. A declared
+`Content-Length` over the limit rejects before body consumption; chunked or
+compressed responses are counted as decoded chunks and raise
+`SnapReqResponseTooLargeError` on overflow. The limit can be set on the client
+or overridden per request; omission keeps the existing unlimited behavior.
+The Node transport and Fetch implementations with a readable response stream
+enforce the bound incrementally. Fetch buffered fallbacks, XHR, and
+proxy-bounce reject a configured bound with `SnapReqUnsupportedFeatureError`
+because they allocate or receive a complete buffered response before SnapReq
+can count it.
 
 ### Timeouts
 

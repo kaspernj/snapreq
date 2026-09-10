@@ -1,6 +1,7 @@
 // @ts-check
 
 import SnapReqHeaders from "./headers.js"
+import {SnapReqResponseTooLargeError} from "./errors.js"
 
 /**
  * Concatenates a list of byte chunks into a single `Uint8Array`.
@@ -44,8 +45,9 @@ export default class SnapReqResponse {
    * @param {() => void} [options.onBodyProgress] - Callback fired when a non-empty body chunk is delivered.
    * @param {(error: unknown) => unknown} [options.mapBodyError] - Maps body read errors before rethrowing.
    * @param {(error: unknown) => void} [options.cancelBody] - Cancels transport-owned body resources.
+   * @param {number} [options.maxResponseBytes] - Maximum decoded response bytes that may be consumed.
    */
-  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, onBodyProgress, mapBodyError, cancelBody}) {
+  constructor({url, method, status, statusText = "", headers, bytes, stream, nodeStream, onBodyDone, onBodyProgress, mapBodyError, cancelBody, maxResponseBytes}) {
     this.url = url
     this.method = method
     this.status = status
@@ -63,6 +65,8 @@ export default class SnapReqResponse {
     this._onBodyProgress = onBodyProgress
     this._mapBodyError = mapBodyError
     this._cancelBody = cancelBody
+    this._maxResponseBytes = maxResponseBytes
+    this._receivedResponseBytes = 0
     /** @type {unknown | null} */
     this._bodyAbortError = null
 
@@ -103,6 +107,7 @@ export default class SnapReqResponse {
    * @returns {Promise<Uint8Array>} - The full response body.
    */
   async bytes() {
+    if (this._bodyAbortError) throw this._mappedBodyError(this._bodyAbortError)
     if (this._bytes) return this._bytes
 
     if (!this._stream) {
@@ -172,6 +177,7 @@ export default class SnapReqResponse {
     return (async function* () {
       try {
         for await (const chunk of source) {
+          response._recordResponseBytes(chunk.byteLength)
           if (chunk.byteLength > 0 && response._onBodyProgress) response._onBodyProgress()
           yield chunk
         }
@@ -182,6 +188,68 @@ export default class SnapReqResponse {
         response._finishBody()
       }
     })()
+  }
+
+  /**
+   * Applies a decoded response-body limit after response headers arrive.
+   * @param {number | undefined} maxResponseBytes - Maximum decoded bytes, or undefined for no limit.
+   * @returns {void}
+   */
+  _setMaxResponseBytes(maxResponseBytes) {
+    this._maxResponseBytes = maxResponseBytes
+    if (maxResponseBytes === undefined) return
+
+    const contentLength = this.headers.get("content-length")
+    const contentEncoding = this.headers.get("content-encoding")
+    const declaredBytes = (!contentEncoding || contentEncoding === "identity") && contentLength && /^\d+$/.test(contentLength)
+      ? Number(contentLength)
+      : undefined
+    const alreadyBufferedBytes = this._bytes?.byteLength
+    const oversizedBytes = declaredBytes !== undefined && declaredBytes > maxResponseBytes
+      ? declaredBytes
+      : alreadyBufferedBytes !== undefined && alreadyBufferedBytes > maxResponseBytes
+        ? alreadyBufferedBytes
+        : undefined
+
+    if (oversizedBytes !== undefined) this._rejectOversizedResponse(oversizedBytes)
+  }
+
+  /**
+   * Records a decoded response chunk before exposing or retaining it.
+   * @param {number} byteLength - Decoded chunk byte length.
+   * @returns {void}
+   */
+  _recordResponseBytes(byteLength) {
+    this._receivedResponseBytes += byteLength
+
+    if (this._maxResponseBytes !== undefined && this._receivedResponseBytes > this._maxResponseBytes) {
+      this._rejectOversizedResponse(this._receivedResponseBytes)
+      throw this._bodyAbortError
+    }
+  }
+
+  /**
+   * Cancels an oversized response and retains the stable package error.
+   * @param {number} receivedBytes - Declared or observed response bytes.
+   * @returns {void}
+   */
+  _rejectOversizedResponse(receivedBytes) {
+    if (this._bodyAbortError instanceof SnapReqResponseTooLargeError) return
+
+    const maxResponseBytes = this._maxResponseBytes
+
+    if (maxResponseBytes === undefined) return
+
+    const error = new SnapReqResponseTooLargeError({
+      maxResponseBytes,
+      method: this.method,
+      receivedBytes,
+      url: this.url
+    })
+
+    this._bodyAbortError = error
+    this._cancelBody?.(error)
+    this._finishBody()
   }
 
   /**

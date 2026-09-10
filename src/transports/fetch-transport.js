@@ -1,7 +1,7 @@
 // @ts-check
 
 import {buildCapabilities} from "../capabilities.js"
-import {SnapReqAbortError, SnapReqUnsupportedFeatureError} from "../errors.js"
+import {SnapReqAbortError, SnapReqRedirectError, SnapReqUnsupportedFeatureError} from "../errors.js"
 import SnapReqHeaders from "../headers.js"
 import SnapReqResponse from "../response.js"
 
@@ -20,7 +20,8 @@ async function* completedByteStream(bytes) {
  * Node 18+. It cannot open Unix sockets, present client certificates or
  * compress request bodies — those raise `SnapReqUnsupportedFeatureError`.
  * Response streaming uses `response.body` where available and otherwise buffers
- * the body once, keeping the same stream interface everywhere.
+ * the body once. Explicit response bounds reject that buffered fallback because
+ * Fetch provides no incremental bytes to count.
  */
 export default class FetchTransport {
   /** @returns {string} - Transport name. */
@@ -64,6 +65,8 @@ export default class FetchTransport {
       headers: request.headers.toObject()
     }
 
+    if (request.redirect) init.redirect = "manual"
+
     const bodyController = new AbortController()
     const requestSignal = request.signal
     const forwardAbort = () => bodyController.abort(requestSignal?.reason)
@@ -100,6 +103,20 @@ export default class FetchTransport {
       throw error
     }
 
+    if (fetchResponse.type === "opaqueredirect" && request.redirect === "error") {
+      finishBodyControl()
+      throw new SnapReqRedirectError({location: null, policy: "error", status: 0, url: request.url})
+    }
+
+    if (fetchResponse.type === "opaqueredirect" && request.redirect) {
+      finishBodyControl()
+      throw new SnapReqUnsupportedFeatureError({
+        feature: `explicit redirect policy "${request.redirect}"`,
+        transport: "fetch",
+        detail: "this Fetch implementation hides manual redirect status, target URL and headers"
+      })
+    }
+
     if (!fetchResponse.body && (request.method === "HEAD" || FETCH_NULL_BODY_STATUSES.has(fetchResponse.status))) {
       finishBodyControl()
       const bytes = new Uint8Array(0)
@@ -113,6 +130,21 @@ export default class FetchTransport {
         bytes,
         stream: completedByteStream(bytes)
       })
+    }
+
+    if (
+      request.maxResponseBytes !== undefined &&
+      (!fetchResponse.body || typeof fetchResponse.body.getReader !== "function")
+    ) {
+      const error = new SnapReqUnsupportedFeatureError({
+        feature: "bounded buffered responses",
+        transport: "fetch",
+        detail: "this Fetch implementation does not expose a readable response stream"
+      })
+
+      bodyController.abort(error)
+      finishBodyControl()
+      throw error
     }
 
     if (
