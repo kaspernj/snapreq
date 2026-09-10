@@ -72,6 +72,14 @@ export default class ProxyBounceTransport {
    * @returns {Promise<SnapReqResponse>} - The response.
    */
   async performRequest(request) {
+    if (request.redirect) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "explicit redirect policies",
+        transport: "proxy-bounce",
+        detail: "the target response is produced by the remote proxy"
+      })
+    }
+
     if (request.idleTimeoutMs && request.idleTimeoutMs > 0) {
       throw new SnapReqUnsupportedFeatureError({
         feature: "idle timeouts",

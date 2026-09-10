@@ -31,6 +31,14 @@ export default class XhrTransport {
    * @returns {Promise<SnapReqResponse>} - The response.
    */
   performRequest(request) {
+    if (request.redirect) {
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "explicit redirect policies",
+        transport: "xhr",
+        detail: "XMLHttpRequest does not expose redirect responses"
+      })
+    }
+
     if (request.bodyCompression && request.bodyCompression !== "identity") {
       throw new SnapReqUnsupportedFeatureError({feature: "request body compression", transport: "xhr"})
     }

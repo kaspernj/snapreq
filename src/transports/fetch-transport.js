@@ -1,7 +1,7 @@
 // @ts-check
 
 import {buildCapabilities} from "../capabilities.js"
-import {SnapReqAbortError, SnapReqUnsupportedFeatureError} from "../errors.js"
+import {SnapReqAbortError, SnapReqRedirectError, SnapReqUnsupportedFeatureError} from "../errors.js"
 import SnapReqHeaders from "../headers.js"
 import SnapReqResponse from "../response.js"
 
@@ -64,6 +64,8 @@ export default class FetchTransport {
       headers: request.headers.toObject()
     }
 
+    if (request.redirect) init.redirect = "manual"
+
     const bodyController = new AbortController()
     const requestSignal = request.signal
     const forwardAbort = () => bodyController.abort(requestSignal?.reason)
@@ -98,6 +100,20 @@ export default class FetchTransport {
       if (error instanceof Error && error.name === "AbortError") throw new SnapReqAbortError()
 
       throw error
+    }
+
+    if (fetchResponse.type === "opaqueredirect" && request.redirect === "error") {
+      finishBodyControl()
+      throw new SnapReqRedirectError({location: null, policy: "error", status: 0, url: request.url})
+    }
+
+    if (fetchResponse.type === "opaqueredirect" && request.redirect === "follow") {
+      finishBodyControl()
+      throw new SnapReqUnsupportedFeatureError({
+        feature: "cross-origin redirect following",
+        transport: "fetch",
+        detail: "manual Fetch redirects do not expose the target URL or headers"
+      })
     }
 
     if (!fetchResponse.body && (request.method === "HEAD" || FETCH_NULL_BODY_STATUSES.has(fetchResponse.status))) {

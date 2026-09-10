@@ -38,6 +38,50 @@ export class SnapReqHttpError extends SnapReqError {
   }
 }
 
+/** Thrown when an explicit redirect policy rejects an HTTP redirect. */
+export class SnapReqRedirectError extends SnapReqError {
+  /**
+   * @param {object} options - Redirect metadata.
+   * @param {string} options.url - URL that returned the redirect.
+   * @param {number} options.status - Redirect status code.
+   * @param {string | null} options.location - Redirect target, when supplied.
+   * @param {"error" | "follow"} options.policy - Policy that rejected the redirect.
+   * @param {number} [options.maxRedirects] - Configured maximum when follow mode exhausted it.
+   */
+  constructor({url, status, location, policy, maxRedirects}) {
+    const detail = maxRedirects === undefined
+      ? `Redirect rejected by the "${policy}" policy: ${status} ${url}`
+      : `Redirect maximum of ${maxRedirects} exceeded: ${status} ${url}`
+
+    super(detail)
+    this.name = "SnapReqRedirectError"
+    this.url = url
+    this.status = status
+    this.location = location
+    this.policy = policy
+    this.maxRedirects = maxRedirects
+  }
+}
+
+/** Thrown when a response body exceeds its configured byte limit. */
+export class SnapReqResponseTooLargeError extends SnapReqError {
+  /**
+   * @param {object} options - Response-bound metadata.
+   * @param {string} options.method - HTTP method used for the request.
+   * @param {string} options.url - URL that returned the response.
+   * @param {number} options.maxResponseBytes - Configured decoded-body byte limit.
+   * @param {number} options.receivedBytes - Bytes declared or observed when the limit was exceeded.
+   */
+  constructor({method, url, maxResponseBytes, receivedBytes}) {
+    super(`Response exceeded the configured limit of ${maxResponseBytes} bytes after ${receivedBytes} bytes: ${method} ${url}`)
+    this.name = "SnapReqResponseTooLargeError"
+    this.method = method
+    this.url = url
+    this.maxResponseBytes = maxResponseBytes
+    this.receivedBytes = receivedBytes
+  }
+}
+
 /**
  * Thrown when a request asks for a capability the active transport cannot
  * provide on the current platform (for example a Unix socket or request-body
