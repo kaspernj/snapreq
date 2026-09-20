@@ -49,7 +49,7 @@
     "@kaspernj/hermes-compose": "0.0.0",
     "@types/node": "^26.0.1",
     "@types/ws": "^8.18.1",
-    "@velocious/testing": "0.0.0",
+    "@velocious/testing": "0.0.17",
     "eslint": "^10.3.0",
     "eslint-plugin-jsdoc": "^63.0.0",
     "globals": "^17.6.0",
