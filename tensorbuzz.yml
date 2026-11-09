@@ -1,4 +1,15 @@
 before_script:
   - npm install
+paths:
+  - src/**
+  - spec/**
+  - package.json
+  - package-lock.json
+  - eslint.config.js
+  - tsconfig.json
+  - hermes.config.js
+  - compose.hermes.yml
+  - Dockerfile.hermes
+  - changelog.d/**
 script:
   - npm run all-checks
